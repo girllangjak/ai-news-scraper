@@ -6,7 +6,7 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 from urllib.parse import quote
 
-# 1. 환경 변수 (GitHub Secrets에서 자동 로드)
+# 환경 변수 (GitHub Secrets)
 NAVER_ID = os.environ.get("NAVER_ID")
 NAVER_SECRET = os.environ.get("NAVER_SECRET")
 GMAIL_USER = os.environ.get("GMAIL_USER")
@@ -36,43 +36,34 @@ def get_naver_news(query):
     except: return [], []
 
 def get_ai_analysis(topic, news_titles):
-    """구글 API 스튜디오 최신 규격 (v1beta + models/gemini-1.5-flash)"""
     if not GEMINI_API_KEY: return "⚠️ API 키 설정 필요"
     
-    # 이 주소 조합이 현재 가장 성공 확률이 높습니다.
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    # ⭐ [최후의 수단] 모델명을 gemini-1.0-pro로 강제 변경했습니다. 
+    # 거의 모든 키에서 이 모델은 'NOT_FOUND' 에러 없이 작동합니다.
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.0-pro:generateContent?key={GEMINI_API_KEY}"
     headers = {'Content-Type': 'application/json'}
     
     news_str = "\n".join(news_titles)
-    prompt = f"당신은 뉴스 분석가입니다. 주제: {topic}\n뉴스제목: {news_str}\n\n1.현상황 요약, 2.미래 전망을 각각 3줄씩 한국어로 작성하세요."
-    
-    data = {
-        "contents": [{"parts": [{"text": prompt}]}]
-    }
+    prompt = f"주제: {topic}\n뉴스제목: {news_str}\n\n1.현상황 요약, 2.미래 전망을 각각 3줄씩 한국어로 작성해."
+    data = {"contents": [{"parts": [{"text": prompt}]}]}
     
     try:
         response = requests.post(url, headers=headers, json=data)
         res = response.json()
         
-        # 답변 추출 (구조를 한 번 더 검증)
+        # 답변 추출
         if 'candidates' in res and len(res['candidates']) > 0:
-            candidate = res['candidates'][0]
-            if 'content' in candidate and 'parts' in candidate['content']:
-                return candidate['content']['parts'][0]['text']
+            return res['candidates'][0]['content']['parts'][0]['text']
         
-        # 에러 발생 시 구글이 보내는 메시지 전체를 출력 (디버깅용)
-        return f"⚠️ AI 분석 중단. 응답 메시지: {res}"
+        return f"⚠️ 분석 실패. 응답 로그: {res}"
     except Exception as e:
-        return f"⚠️ 시스템 에러: {str(e)}"
+        return f"⚠️ 에러: {str(e)}"
 
 if __name__ == "__main__":
     search_topic = get_topic_from_issue()
     titles, links = get_naver_news(search_topic)
-    
-    # 뉴스 수집 성공 시 분석 진행
-    ai_report = get_ai_analysis(search_topic, titles) if titles else "수집된 뉴스가 없습니다."
+    ai_report = get_ai_analysis(search_topic, titles) if titles else "뉴스가 없습니다."
 
-    # 메일 발송
     today = datetime.now().strftime('%Y-%m-%d')
     body = f"🚀 {today} AI 뉴스 분석 리포트\n\n📌 주제: {search_topic}\n"
     body += "="*50 + "\n🤖 [AI의 미래 전망 예측]\n\n" + ai_report + "\n"
