@@ -9,18 +9,13 @@ jobs:
   run-bot:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.9'
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests feedparser
+        run: pip install requests feedparser
 
       - name: Run script
         env:
@@ -28,4 +23,5 @@ jobs:
           NAVER_SECRET: ${{ secrets.NAVER_SECRET }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_PW: ${{ secrets.GMAIL_PW }}
-        run: python news_bot.py
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} # 이 토큰은 GitHub이 알아서 생성해줍니다
+        run: python news_bot.py # 바뀐 파일명 확인!
