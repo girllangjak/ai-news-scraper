@@ -38,12 +38,12 @@ def get_naver_news(query):
 def get_ai_analysis(topic, news_titles):
     if not GEMINI_API_KEY: return "⚠️ API 키 설정 필요"
     
-    # 이 주소가 구글 AI 스튜디오 키와 호환되는 최신 규격입니다.
+    # ⭐ [최종 수정] v1beta와 models/ 경로를 조합한 가장 확실한 URL입니다.
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     headers = {'Content-Type': 'application/json'}
     
     news_str = "\n".join(news_titles)
-    prompt = f"당신은 전문 분석가입니다. 주제: {topic}\n뉴스제목들: {news_str}\n\n1.현재 상황 요약(3줄), 2.미래 전망(3줄)을 한국어로 작성하세요."
+    prompt = f"당신은 투자 전문가입니다. 주제: {topic}\n뉴스제목들: {news_titles}\n\n1.현재 상황 요약(3줄), 2.향후 전망 및 대응 전략(3줄)을 한국어로 작성하세요."
     data = {"contents": [{"parts": [{"text": prompt}]}]}
     
     try:
@@ -53,7 +53,9 @@ def get_ai_analysis(topic, news_titles):
         if 'candidates' in res and len(res['candidates']) > 0:
             return res['candidates'][0]['content']['parts'][0]['text']
         else:
-            return f"⚠️ 분석 불가. 사유: {res.get('error', {}).get('message', '알 수 없는 응답 구조')}"
+            # 에러 메시지 상세 출력
+            error_msg = res.get('error', {}).get('message', '알 수 없는 응답 구조')
+            return f"⚠️ 분석 불가. 사유: {error_msg}"
     except Exception as e:
         return f"⚠️ 시스템 에러: {str(e)}"
 
