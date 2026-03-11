@@ -28,4 +28,4 @@ jobs:
           NAVER_SECRET: ${{ secrets.NAVER_SECRET }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_PW: ${{ secrets.GMAIL_PW }}
-        run: python main.py
+        run: python news_bot.py
