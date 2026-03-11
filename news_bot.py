@@ -12,20 +12,21 @@ NAVER_SECRET = os.environ.get("NAVER_SECRET")
 GMAIL_USER = os.environ.get("GMAIL_USER")
 GMAIL_PW = os.environ.get("GMAIL_PW")
 GH_TOKEN = os.environ.get("GH_TOKEN")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 REPO = "girllangjak/ai-news-scraper"
 
 def get_topic_from_issue():
+    """GitHub 이슈에서 주제 가져오기"""
     url = f"https://api.github.com/repos/{REPO}/issues?state=open"
     headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github.v3+json"}
     try:
         res = requests.get(url, headers=headers).json()
         if res and isinstance(res, list): return res[0]['title']
     except: pass
-    return "국내 주요 뉴스"
+    return "오늘의 주요 뉴스"
 
 def get_naver_news(query):
-    url = f"https://openapi.naver.com/v1/search/news.json?query={quote(query)}&display=7&sort=sim"
+    """네이버 뉴스 검색"""
+    url = f"https://openapi.naver.com/v1/search/news.json?query={quote(query)}&display=10&sort=sim"
     headers = {"X-Naver-Client-Id": NAVER_ID, "X-Naver-Client-Secret": NAVER_SECRET}
     try:
         res = requests.get(url, headers=headers).json()
@@ -35,49 +36,37 @@ def get_naver_news(query):
         return titles, links
     except: return [], []
 
-def get_ai_analysis(topic, news_titles):
-    if not GEMINI_API_KEY: return "⚠️ API 키 설정 필요"
-    
-    # ⭐ [최후의 수단] 모델명을 gemini-1.0-pro로 강제 변경했습니다. 
-    # 거의 모든 키에서 이 모델은 'NOT_FOUND' 에러 없이 작동합니다.
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.0-pro:generateContent?key={GEMINI_API_KEY}"
-    headers = {'Content-Type': 'application/json'}
-    
-    news_str = "\n".join(news_titles)
-    prompt = f"주제: {topic}\n뉴스제목: {news_str}\n\n1.현상황 요약, 2.미래 전망을 각각 3줄씩 한국어로 작성해."
-    data = {"contents": [{"parts": [{"text": prompt}]}]}
-    
-    try:
-        response = requests.post(url, headers=headers, json=data)
-        res = response.json()
-        
-        # 답변 추출
-        if 'candidates' in res and len(res['candidates']) > 0:
-            return res['candidates'][0]['content']['parts'][0]['text']
-        
-        return f"⚠️ 분석 실패. 응답 로그: {res}"
-    except Exception as e:
-        return f"⚠️ 에러: {str(e)}"
-
 if __name__ == "__main__":
+    # 1. 데이터 수집
     search_topic = get_topic_from_issue()
     titles, links = get_naver_news(search_topic)
-    ai_report = get_ai_analysis(search_topic, titles) if titles else "뉴스가 없습니다."
 
+    # 2. 메일 본문 구성 (분석 기능 제거, 뉴스 리스트만 강조)
     today = datetime.now().strftime('%Y-%m-%d')
-    body = f"🚀 {today} AI 뉴스 분석 리포트\n\n📌 주제: {search_topic}\n"
-    body += "="*50 + "\n🤖 [AI의 미래 전망 예측]\n\n" + ai_report + "\n"
-    body += "="*50 + "\n\n📑 관련 뉴스 링크:\n"
-    for i, (t, l) in enumerate(zip(titles, links), 1):
-        body += f"{i}. {t}\n   🔗 {l}\n"
+    body = f"🗞️ {today} 실시간 뉴스 리포트\n\n"
+    body += f"📌 검색 주제: {search_topic}\n"
+    body += "="*50 + "\n"
     
+    if titles:
+        for i, (t, l) in enumerate(zip(titles, links), 1):
+            body += f"{i}. {t}\n   🔗 {l}\n\n"
+    else:
+        body += "검색된 뉴스 결과가 없습니다. 주제를 확인해 주세요."
+    
+    body += "="*50 + "\n"
+    body += "※ AI 분석 기능은 현재 서버 점검으로 인해 제외되었습니다."
+
+    # 3. 이메일 발송
     msg = MIMEMultipart()
     msg['From'] = GMAIL_USER
     msg['To'] = GMAIL_USER
-    msg['Subject'] = f"📅 [AI 뉴스 리포트] {today} - {search_topic}"
+    msg['Subject'] = f"📅 [뉴스 리포트] {today} - {search_topic}"
     msg.attach(MIMEText(body, 'plain'))
 
-    with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
-        server.login(GMAIL_USER, GMAIL_PW)
-        server.sendmail(GMAIL_USER, GMAIL_USER, msg.as_string())
-    print("✅ 발송 완료!")
+    try:
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+            server.login(GMAIL_USER, GMAIL_PW)
+            server.sendmail(GMAIL_USER, GMAIL_USER, msg.as_string())
+        print("✅ 뉴스 리포트 발송 완료!")
+    except Exception as e:
+        print(f"❌ 발송 실패: {e}")
