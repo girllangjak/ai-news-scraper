@@ -38,21 +38,22 @@ def get_naver_news(query):
 def get_ai_analysis(topic, news_titles):
     if not GEMINI_API_KEY: return "⚠️ API 키 설정 필요"
     
-    # ⭐ 가장 안정적인 v1 주소로 변경했습니다!
-    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    # 이 주소가 구글 AI 스튜디오 키와 호환되는 최신 규격입니다.
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     headers = {'Content-Type': 'application/json'}
     
     news_str = "\n".join(news_titles)
-    prompt = f"주제: {topic}\n뉴스제목들: {news_titles}\n\n위 뉴스들을 분석해서 1.현재 상황 요약(3줄), 2.미래 전망(3줄)을 한국어로 작성해."
+    prompt = f"당신은 전문 분석가입니다. 주제: {topic}\n뉴스제목들: {news_str}\n\n1.현재 상황 요약(3줄), 2.미래 전망(3줄)을 한국어로 작성하세요."
     data = {"contents": [{"parts": [{"text": prompt}]}]}
     
     try:
         response = requests.post(url, headers=headers, json=data)
         res = response.json()
-        # 답변 추출
-        if 'candidates' in res:
+        
+        if 'candidates' in res and len(res['candidates']) > 0:
             return res['candidates'][0]['content']['parts'][0]['text']
-        return f"⚠️ 분석 실패: {res.get('error', {}).get('message', '알 수 없는 에러')}"
+        else:
+            return f"⚠️ 분석 불가. 사유: {res.get('error', {}).get('message', '알 수 없는 응답 구조')}"
     except Exception as e:
         return f"⚠️ 시스템 에러: {str(e)}"
 
@@ -62,7 +63,7 @@ if __name__ == "__main__":
     ai_report = get_ai_analysis(search_topic, titles)
 
     today = datetime.now().strftime('%Y-%m-%d')
-    body = f"🚀 {today} AI 뉴스 리포트\n\n📌 주제: {search_topic}\n"
+    body = f"🚀 {today} AI 뉴스 분석 리포트\n\n📌 주제: {search_topic}\n"
     body += "="*50 + "\n🤖 [AI의 미래 전망 예측]\n\n" + ai_report + "\n"
     body += "="*50 + "\n\n📑 관련 뉴스 링크:\n"
     for i, (t, l) in enumerate(zip(titles, links), 1):
