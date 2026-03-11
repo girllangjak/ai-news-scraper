@@ -1,0 +1,30 @@
+name: Daily News Scraper
+
+on:
+  schedule:
+    # 한국 시간 기준 매일 오전 7시 (세계 표준시 UTC 22:00)
+    - cron: '0 22 * * *'
+  workflow_dispatch: # 직접 실행해볼 수 있는 버튼 생성
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run script
+        env:
+          NAVER_ID: ${{ secrets.NAVER_ID }}
+          NAVER_SECRET: ${{ secrets.NAVER_SECRET }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_PW: ${{ secrets.GMAIL_PW }}
+        run: python main.py
