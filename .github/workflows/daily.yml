@@ -2,19 +2,18 @@ name: Daily News Scraper
 
 on:
   schedule:
-    # 한국 시간 기준 매일 오전 7시 (세계 표준시 UTC 22:00)
-    - cron: '0 22 * * *'
-  workflow_dispatch: # 직접 실행해볼 수 있는 버튼 생성
+    - cron: '0 22 * * *' # 한국 시간 오전 7시
+  workflow_dispatch: # 수동 실행 버튼
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4 # 최신 버전으로 업데이트
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5 # 최신 버전으로 업데이트
         with:
           python-version: '3.9'
 
