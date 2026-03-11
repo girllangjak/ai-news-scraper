@@ -38,41 +38,31 @@ def get_naver_news(query):
 def get_ai_analysis(topic, news_titles):
     if not GEMINI_API_KEY: return "⚠️ API 키 설정 필요"
     
-    # 💡 모델 버전을 1.5-flash로 명확히 지정
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    # ⭐ 가장 안정적인 v1 주소로 변경했습니다!
+    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     headers = {'Content-Type': 'application/json'}
     
     news_str = "\n".join(news_titles)
-    prompt = f"당신은 금융 분석가입니다. 주제: {topic}\n뉴스들: {news_str}\n\n1.현재 상황 요약(3줄), 2.향후 미래 전망 예측(3줄)을 한국어로 작성하세요."
-
-    # 💡 데이터 구조를 가장 표준적인 방식으로 수정
-    data = {
-        "contents": [{"parts": [{"text": prompt}]}]
-    }
+    prompt = f"주제: {topic}\n뉴스제목들: {news_titles}\n\n위 뉴스들을 분석해서 1.현재 상황 요약(3줄), 2.미래 전망(3줄)을 한국어로 작성해."
+    data = {"contents": [{"parts": [{"text": prompt}]}]}
     
     try:
         response = requests.post(url, headers=headers, json=data)
         res = response.json()
-        
-        # 💡 답변 추출 경로를 더 꼼꼼하게 체크
-        if 'candidates' in res and len(res['candidates']) > 0:
-            candidate = res['candidates'][0]
-            if 'content' in candidate and 'parts' in candidate['content']:
-                return candidate['content']['parts'][0]['text']
-        
-        # 💡 실패 시 구체적인 이유 반환 (에러 디버깅용)
-        return f"⚠️ 분석 실패. 응답 내용: {str(res)[:200]}"
+        # 답변 추출
+        if 'candidates' in res:
+            return res['candidates'][0]['content']['parts'][0]['text']
+        return f"⚠️ 분석 실패: {res.get('error', {}).get('message', '알 수 없는 에러')}"
     except Exception as e:
         return f"⚠️ 시스템 에러: {str(e)}"
 
 if __name__ == "__main__":
     search_topic = get_topic_from_issue()
     titles, links = get_naver_news(search_topic)
-    
     ai_report = get_ai_analysis(search_topic, titles)
 
     today = datetime.now().strftime('%Y-%m-%d')
-    body = f"🚀 {today} AI 뉴스 분석 리포트\n\n📌 주제: {search_topic}\n"
+    body = f"🚀 {today} AI 뉴스 리포트\n\n📌 주제: {search_topic}\n"
     body += "="*50 + "\n🤖 [AI의 미래 전망 예측]\n\n" + ai_report + "\n"
     body += "="*50 + "\n\n📑 관련 뉴스 링크:\n"
     for i, (t, l) in enumerate(zip(titles, links), 1):
