@@ -30,7 +30,7 @@ def get_naver_news(query):
     try:
         res = requests.get(url, headers=headers).json()
         items = res.get('items', [])
-        titles = [item['title'].replace("<b>", "").replace("</b>", "").replace("&quot;", '"') for item in items]
+        titles = [item['title'].replace("<b>", "").replace("</b>", "").replace("&quot;", '"').replace("&amp;", "&") for item in items]
         links = [item['link'] for item in items]
         return titles, links
     except: return [], []
@@ -38,37 +38,32 @@ def get_naver_news(query):
 def get_ai_analysis(topic, news_titles):
     if not GEMINI_API_KEY: return "⚠️ API 키 설정 필요"
     
+    # 💡 모델 버전을 1.5-flash로 명확히 지정
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     headers = {'Content-Type': 'application/json'}
     
     news_str = "\n".join(news_titles)
-    # 프롬프트 수정: 객관적인 분석가 역할을 부여하여 안전 필터 회피 유도
-    prompt = (
-        f"당신은 전문 뉴스 분석가입니다. 다음 뉴스들을 바탕으로 '객관적인 경제 및 사회 트렌드'를 분석하세요.\n"
-        f"주제: {topic}\n뉴스들: {news_str}\n\n"
-        f"위 내용을 토대로 1.현재 상황 요약(3줄), 2.향후 미래 전망 및 사회적 영향(3줄)을 한국어로 작성하세요."
-    )
+    prompt = f"당신은 금융 분석가입니다. 주제: {topic}\n뉴스들: {news_str}\n\n1.현재 상황 요약(3줄), 2.향후 미래 전망 예측(3줄)을 한국어로 작성하세요."
 
+    # 💡 데이터 구조를 가장 표준적인 방식으로 수정
     data = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        # 안전 설정을 낮추어 분석이 중단되지 않게 함
-        "safetySettings": [
-            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
-        ]
+        "contents": [{"parts": [{"text": prompt}]}]
     }
     
     try:
-        res = requests.post(url, headers=headers, json=data).json()
-        # 데이터가 비어있는지 꼼꼼하게 체크
-        if 'candidates' in res and res['candidates'][0].get('content'):
-            return res['candidates'][0]['content']['parts'][0]['text']
-        else:
-            return f"⚠️ AI가 내용을 생성하지 못했습니다. (사유: {res.get('promptFeedback', '알 수 없음')})"
+        response = requests.post(url, headers=headers, json=data)
+        res = response.json()
+        
+        # 💡 답변 추출 경로를 더 꼼꼼하게 체크
+        if 'candidates' in res and len(res['candidates']) > 0:
+            candidate = res['candidates'][0]
+            if 'content' in candidate and 'parts' in candidate['content']:
+                return candidate['content']['parts'][0]['text']
+        
+        # 💡 실패 시 구체적인 이유 반환 (에러 디버깅용)
+        return f"⚠️ 분석 실패. 응답 내용: {str(res)[:200]}"
     except Exception as e:
-        return f"⚠️ 분석 에러 발생: {str(e)}"
+        return f"⚠️ 시스템 에러: {str(e)}"
 
 if __name__ == "__main__":
     search_topic = get_topic_from_issue()
