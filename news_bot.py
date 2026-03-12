@@ -15,11 +15,11 @@ CONFIG = {
     "GH_TOKEN": os.environ.get("GH_TOKEN"),
     "GEMINI_API_KEY": os.environ.get("GEMINI_API_KEY"),
     "REPO": "girllangjak/ai-news-scraper",
-    "SEARCH_LIMIT": 20,
     "FINAL_COUNT": 5,
 }
 
 def get_target_topic():
+    """GitHub 이슈에서 주제 가져오기 (GH_TOKEN 필수)"""
     url = f"https://api.github.com/repos/{CONFIG['REPO']}/issues?state=open"
     headers = {"Authorization": f"token {CONFIG['GH_TOKEN']}", "Accept": "application/vnd.github.v3+json"}
     try:
@@ -28,51 +28,42 @@ def get_target_topic():
     except: return "오늘의 주요 뉴스"
 
 def get_ai_summary(title):
-    """구글 AI 스튜디오 최신 규격 적용"""
-    if not CONFIG["GEMINI_API_KEY"]: return "API 키 미설정"
+    """AI 요약 (가장 안정적인 v1beta 경로)"""
+    if not CONFIG["GEMINI_API_KEY"]: return "API 키 확인 필요"
     
-    # 안정적인 v1beta 경로 사용
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={CONFIG['GEMINI_API_KEY']}"
     headers = {'Content-Type': 'application/json'}
-    
-    prompt = f"뉴스 제목: '{title}'\n이 뉴스 제목의 핵심 내용을 한국어로 1문장으로 요약해줘."
+    prompt = f"이 뉴스 제목을 한국어 한 문장으로 핵심만 요약해줘: {title}"
     data = {"contents": [{"parts": [{"text": prompt}]}]}
     
     try:
         response = requests.post(url, headers=headers, json=data, timeout=10)
         res = response.json()
-        if 'candidates' in res and len(res['candidates']) > 0:
-            return res['candidates'][0]['content']['parts'][0]['text'].strip()
-        
-        # 에러 메시지 상세 확인용
-        return f"요약 실패: {res.get('error', {}).get('message', '알 수 없는 에러')[:20]}"
+        return res['candidates'][0]['content']['parts'][0]['text'].strip()
     except:
-        return "통신 지연으로 요약 불가"
+        return "요약 생성 실패 (API 응답 오류)"
 
-def fetch_news(query):
-    """검색 정교화: 검색어와 밀접한 뉴스만 추출"""
-    # 검색어 정교화 (반드시 기사 제목에 검색어가 포함되도록 + 필수 연산자 사용)
-    refined_query = f"{query} -광고 -홍보"
-    url = f"https://openapi.naver.com/v1/search/news.json?query={quote(refined_query)}&display={CONFIG['SEARCH_LIMIT']}&sort=sim"
+def fetch_refined_news(query):
+    """정밀 검색: 제목에 검색어가 포함된 뉴스만 추출"""
+    # 검색어 정교화: 이란 전쟁 -> '이란'과 '전쟁'이 모두 포함되도록
+    search_query = f"{query} -광고 -홍보"
+    url = f"https://openapi.naver.com/v1/search/news.json?query={quote(search_query)}&display=20&sort=sim"
     headers = {"X-Naver-Client-Id": CONFIG['NAVER_ID'], "X-Naver-Client-Secret": CONFIG['NAVER_SECRET']}
     
     try:
         items = requests.get(url, headers=headers, timeout=10).json().get('items', [])
-        results = []
-        seen = set()
+        results, seen = [], set()
 
         for item in items:
             title = item['title'].replace("<b>", "").replace("</b>", "").replace("&quot;", '"').replace("&amp;", "&")
             
-            # 검색어가 제목에 아예 없는 기사는 제외 (정교화 로직)
-            keyword = query.split()[0] # 검색어의 첫 단어 (예: 이란)
-            if keyword not in title: continue
-
-            fingerprint = title.replace(" ", "")[:10]
-            if fingerprint not in seen:
-                summary = get_ai_summary(title)
-                results.append({"title": title, "link": item['link'], "summary": summary})
-                seen.add(fingerprint)
+            # [정교화 로직] 검색어의 핵심 단어가 제목에 포함된 경우만 수집
+            if any(word in title for word in query.split()):
+                fingerprint = title.replace(" ", "")[:10]
+                if fingerprint not in seen:
+                    summary = get_ai_summary(title)
+                    results.append({"title": title, "link": item['link'], "summary": summary})
+                    seen.add(fingerprint)
             
             if len(results) >= CONFIG['FINAL_COUNT']: break
         return results
@@ -80,27 +71,25 @@ def fetch_news(query):
 
 if __name__ == "__main__":
     topic = get_target_topic()
-    news_list = fetch_news(topic)
+    news_list = fetch_refined_news(topic)
     
     today = datetime.now().strftime('%Y-%m-%d')
-    content = [f"🤖 AI 분석관 리포트: {topic}\n", "="*50]
+    content = [f"🤖 AI 분석 리포트: {topic}\n", "="*50]
     
     if not news_list:
-        content.append(f"'{topic}'(으)로 검색된 정교한 기사가 없습니다. 주제를 더 구체적으로 적어주세요.")
+        content.append(f"'{topic}' 관련 핵심 뉴스를 찾지 못했습니다. 주제를 '중동 정세' 등으로 바꿔보세요.")
     else:
         for i, news in enumerate(news_list, 1):
             content.append(f"[{i}] {news['title']}")
             content.append(f"📝 요약: {news['summary']}")
             content.append(f"🔗 링크: {news['link']}\n")
     
-    content.append("="*50)
-
     msg = MIMEMultipart()
     msg['From'], msg['To'] = CONFIG['GMAIL_USER'], CONFIG['GMAIL_USER']
-    msg['Subject'] = f"📅 [AI 요약] {today} - {topic}"
+    msg['Subject'] = f"📅 [AI 뉴스] {today} - {topic}"
     msg.attach(MIMEText("\n".join(content), 'plain'))
 
     with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
         server.login(CONFIG['GMAIL_USER'], CONFIG['GMAIL_PW'])
         server.sendmail(CONFIG['GMAIL_USER'], CONFIG['GMAIL_USER'], msg.as_string())
-    print("✅ 발송 완료")
+    print("✅ 발송 성공")
