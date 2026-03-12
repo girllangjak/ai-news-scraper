@@ -2,21 +2,19 @@ name: Daily News Bot
 
 on:
   schedule:
-    - cron: '0 0 * * *' # 매일 아침 실행 (필요시 조정)
+    - cron: '0 0 * * *' # 매일 아침 9시(한국시간) 실행
   workflow_dispatch: # 수동 실행 버튼 활성화
 
 jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      # Node.js 24 강제 사용 설정 (경고 문구 해결)
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true # Node.js 경고 방지
     
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          # 봇이 깃허브에 접근할 때 사용할 신분증을 명시합니다.
           token: ${{ secrets.GH_TOKEN }}
 
       - name: Set up Python
