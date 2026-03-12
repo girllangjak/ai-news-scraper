@@ -3,12 +3,12 @@ import smtplib
 import os
 import xml.etree.ElementTree as ET
 import json
+import re
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 from urllib.parse import quote
 
-# 1. 설정 관리 - GitHub Secrets에서 정보를 가져옵니다.
 CONFIG = {
     "NAVER_ID": os.environ.get("NAVER_ID"),
     "NAVER_SECRET": os.environ.get("NAVER_SECRET"),
@@ -19,102 +19,86 @@ CONFIG = {
     "REPO": "girllangjak/ai-news-scraper",
 }
 
+def clean_text(text):
+    if not text: return ""
+    clean = re.compile('<.*?>|&([a-z0-9]+|#[0-9]{1,6}|#x[0-9a-f]{1,6});')
+    return re.sub(clean, '', text).strip()
+
 def call_gemini(prompt):
-    """Gemini AI에게 답변을 요청하는 함수"""
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key={CONFIG['GEMINI_API_KEY']}"
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
     try:
-        res = requests.post(url, json=payload, timeout=15).json()
+        res = requests.post(url, json=payload, timeout=20).json()
         return res['candidates'][0]['content']['parts'][0]['text'].strip()
-    except: return ""
+    except:
+        return "핵심 내용을 요약 중입니다... (분석 지연)"
 
 def get_target_topic():
-    """GitHub 이슈에서 오늘 검색할 주제를 가져옵니다."""
     url = f"https://api.github.com/repos/{CONFIG['REPO']}/issues?state=open"
     headers = {"Authorization": f"token {CONFIG['GH_TOKEN']}", "Accept": "application/vnd.github.v3+json"}
     try:
-        res = requests.get(url, headers=headers, timeout=10).json()
-        if isinstance(res, list) and len(res) > 0:
-            return res[0]['title']
-        return "오늘의 주요 뉴스"
-    except: return "오늘의 주요 뉴스"
+        res = requests.get(url, headers=headers).json()
+        return res[0]['title'] if isinstance(res, list) and len(res) > 0 else "오늘의 뉴스"
+    except: return "오늘의 뉴스"
 
 def analyze_context(topic):
-    """주제를 분석하여 관련 국가와 영어 검색어를 결정합니다."""
-    prompt = f"주제 '{topic}'과 가장 관련 깊은 국가의 2자리 코드(ISO)와 영어 검색어를 JSON 형식으로 알려줘. 예: {{'gl': 'US', 'query': 'Search Term'}}"
-    result = call_gemini(prompt)
+    prompt = f"주제 '{topic}'과 가장 관련 깊은 국가 코드(ISO)와 영어 검색어를 JSON으로 알려줘. {{'gl': 'US', 'q': 'term'}}"
     try:
+        result = call_gemini(prompt)
         data = json.loads(result[result.find('{'):result.rfind('}')+1])
-        return data.get('gl', 'US'), data.get('query', topic)
-    except:
-        return "US", topic
+        return data.get('gl', 'US'), data.get('q', topic)
+    except: return "US", topic
+
+def fetch_naver_news(topic):
+    url = f"https://openapi.naver.com/v1/search/news.json?query={quote(topic)}&display=5&sort=sim"
+    headers = {"X-Naver-Client-Id": CONFIG['NAVER_ID'], "X-Naver-Client-Secret": CONFIG['NAVER_SECRET']}
+    results = []
+    try:
+        items = requests.get(url, headers=headers).json().get('items', [])
+        for item in items:
+            title = clean_text(item['title'])
+            desc = clean_text(item['description'])
+            # 제목과 설명을 모두 주어 요약 품질을 높임
+            summary = call_gemini(f"이 기사를 한국어 한 문장으로 요약해줘: {title}. 내용: {desc}")
+            results.append({"title": title, "summary": summary, "link": item['link']})
+    except: pass
+    return results
 
 def fetch_google_news(gl, query):
-    """현지 국가의 구글 뉴스 RSS를 검색합니다."""
     rss_url = f"https://news.google.com/rss/search?q={quote(query)}&hl=en-{gl}&gl={gl}&ceid={gl}:en"
+    results = []
     try:
         res = requests.get(rss_url, timeout=10)
         root = ET.fromstring(res.text)
-        results = []
         for item in root.findall('.//item')[:4]:
             title = item.find('title').text
-            link = item.find('link').text
-            summary = call_gemini(f"영문 뉴스 '{title}'을 한국어로 요약 및 번역해줘.")
-            results.append({"title": title, "link": link, "summary": summary})
-        return results
-    except: return []
-
-def fetch_naver_news(topic):
-    """네이버 뉴스를 검색합니다."""
-    url = f"https://openapi.naver.com/v1/search/news.json?query={quote(topic)}&display=5&sort=sim"
-    headers = {"X-Naver-Client-Id": CONFIG['NAVER_ID'], "X-Naver-Client-Secret": CONFIG['NAVER_SECRET']}
-    try:
-        items = requests.get(url, headers=headers, timeout=10).json().get('items', [])
-        results = []
-        for item in items:
-            title = item['title'].replace("<b>", "").replace("</b>", "").replace("&quot;", '"')
-            summary = call_gemini(f"뉴스 '{title}'을 한국어 한 문장으로 요약해줘.")
-            results.append({"title": title, "link": item['link'], "summary": summary})
-        return results
-    except: return []
+            # 영문 제목을 한글로 요약/번역
+            summary = call_gemini(f"영문 기사 제목 '{title}'을 한국어로 번역하고 핵심 내용을 분석해줘.")
+            results.append({"title": title, "summary": summary, "link": item.find('link').text})
+    except: pass
+    return results
 
 if __name__ == "__main__":
-    # 1. 주제 가져오기
     topic = get_target_topic()
-    
-    # 2. 국내 뉴스(네이버) 수집
     naver_res = fetch_naver_news(topic)
-    
-    # 3. 주제 분석 (관련 국가 및 검색어)
     target_gl, eng_query = analyze_context(topic)
-    
-    # 4. 현지 뉴스(구글) 수집 및 번역 요약
     google_res = fetch_google_news(target_gl, eng_query)
     
-    # 5. 메일 내용 작성
     today = datetime.now().strftime('%Y-%m-%d')
-    content = [f"🌐 글로벌 입체 분석 보고서: {topic}", "="*50]
+    content = [f"📊 AI 입체 분석 리포트: {topic}", "="*50]
     
-    content.append(f"\n[🇰🇷 국내 주요 보도 - Naver]")
+    content.append(f"\n[🇰🇷 국내 주요 보도 요약]")
     for n in naver_res:
-        content.append(f"- {n['title']}\n  📝 {n['summary']}\n  🔗 {n['link']}")
+        content.append(f"- {n['title']}\n  📌 {n['summary']}\n  🔗 {n['link']}")
         
-    content.append(f"\n\n[🌏 현지({target_gl}) 보도 및 외신 - Google]")
-    if not google_res:
-        content.append("- 검색된 현지 뉴스가 없습니다.")
+    content.append(f"\n\n[🌏 현지({target_gl}) 및 외신 요약 (한글화)]")
     for g in google_res:
-        content.append(f"- {g['title']}\n  📝 {g['summary']}\n  🔗 {g['link']}")
+        content.append(f"- {g['title']}\n  📌 {g['summary']}\n  🔗 {g['link']}")
     
-    content.append("\n" + "="*50)
-    
-    # 6. 메일 발송
-    msg = MIMEMultipart()
-    msg['From'] = CONFIG['GMAIL_USER']
-    msg['To'] = CONFIG['GMAIL_USER']
-    msg['Subject'] = f"📅 [글로벌 보고서] {today} - {topic}"
+    msg = MIMEMultipart(); msg['From'] = msg['To'] = CONFIG['GMAIL_USER']
+    msg['Subject'] = f"📅 [분석완료] {today} - {topic}"
     msg.attach(MIMEText("\n".join(content), 'plain'))
     
     with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
         server.login(CONFIG['GMAIL_USER'], CONFIG['GMAIL_PW'])
         server.sendmail(CONFIG['GMAIL_USER'], CONFIG['GMAIL_USER'], msg.as_string())
-    print(f"✅ {target_gl} 기반 리포트 발송 완료")
