@@ -15,8 +15,8 @@ CONFIG = {
     "GH_TOKEN": os.environ.get("GH_TOKEN"),
     "GEMINI_API_KEY": os.environ.get("GEMINI_API_KEY"),
     "REPO": "girllangjak/ai-news-scraper",
-    "SEARCH_LIMIT": 15,
-    "FINAL_COUNT": 5, # 요약 품질을 위해 개수를 5개로 정예화
+    "SEARCH_LIMIT": 20,
+    "FINAL_COUNT": 5,
 }
 
 def get_target_topic():
@@ -28,26 +28,31 @@ def get_target_topic():
     except: return "오늘의 주요 뉴스"
 
 def get_ai_summary(title):
-    """Gemini API를 사용하여 기사 제목 기반 핵심 요약 생성"""
-    if not CONFIG["GEMINI_API_KEY"]: return "요약 기능을 사용할 수 없습니다. (API 키 미설정)"
+    """구글 AI 스튜디오 최신 규격 적용"""
+    if not CONFIG["GEMINI_API_KEY"]: return "API 키 미설정"
     
+    # 안정적인 v1beta 경로 사용
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={CONFIG['GEMINI_API_KEY']}"
     headers = {'Content-Type': 'application/json'}
     
-    prompt = f"다음 뉴스 제목을 바탕으로 이 기사가 담고 있을 핵심 내용을 전문가의 시각에서 딱 2줄로 요약해줘. \n뉴스 제목: {title}"
+    prompt = f"뉴스 제목: '{title}'\n이 뉴스 제목의 핵심 내용을 한국어로 1문장으로 요약해줘."
     data = {"contents": [{"parts": [{"text": prompt}]}]}
     
     try:
         response = requests.post(url, headers=headers, json=data, timeout=10)
         res = response.json()
-        if 'candidates' in res:
+        if 'candidates' in res and len(res['candidates']) > 0:
             return res['candidates'][0]['content']['parts'][0]['text'].strip()
-        return "내용 요약 중 오류가 발생했습니다."
+        
+        # 에러 메시지 상세 확인용
+        return f"요약 실패: {res.get('error', {}).get('message', '알 수 없는 에러')[:20]}"
     except:
-        return "요약을 불러올 수 없습니다."
+        return "통신 지연으로 요약 불가"
 
 def fetch_news(query):
-    refined_query = f"{query} -광고 -홍보 -이벤트"
+    """검색 정교화: 검색어와 밀접한 뉴스만 추출"""
+    # 검색어 정교화 (반드시 기사 제목에 검색어가 포함되도록 + 필수 연산자 사용)
+    refined_query = f"{query} -광고 -홍보"
     url = f"https://openapi.naver.com/v1/search/news.json?query={quote(refined_query)}&display={CONFIG['SEARCH_LIMIT']}&sort=sim"
     headers = {"X-Naver-Client-Id": CONFIG['NAVER_ID'], "X-Naver-Client-Secret": CONFIG['NAVER_SECRET']}
     
@@ -58,10 +63,13 @@ def fetch_news(query):
 
         for item in items:
             title = item['title'].replace("<b>", "").replace("</b>", "").replace("&quot;", '"').replace("&amp;", "&")
-            fingerprint = title.replace(" ", "")[:10]
             
+            # 검색어가 제목에 아예 없는 기사는 제외 (정교화 로직)
+            keyword = query.split()[0] # 검색어의 첫 단어 (예: 이란)
+            if keyword not in title: continue
+
+            fingerprint = title.replace(" ", "")[:10]
             if fingerprint not in seen:
-                # 요약 추가
                 summary = get_ai_summary(title)
                 results.append({"title": title, "link": item['link'], "summary": summary})
                 seen.add(fingerprint)
@@ -75,22 +83,24 @@ if __name__ == "__main__":
     news_list = fetch_news(topic)
     
     today = datetime.now().strftime('%Y-%m-%d')
-    content = [f"🤖 AI 분석관이 선별한 오늘의 뉴스: {topic}\n", "="*50]
+    content = [f"🤖 AI 분석관 리포트: {topic}\n", "="*50]
     
-    for i, news in enumerate(news_list, 1):
-        content.append(f"[{i}] {news['title']}")
-        content.append(f"📝 AI 요약: {news['summary']}")
-        content.append(f"🔗 링크: {news['link']}\n")
+    if not news_list:
+        content.append(f"'{topic}'(으)로 검색된 정교한 기사가 없습니다. 주제를 더 구체적으로 적어주세요.")
+    else:
+        for i, news in enumerate(news_list, 1):
+            content.append(f"[{i}] {news['title']}")
+            content.append(f"📝 요약: {news['summary']}")
+            content.append(f"🔗 링크: {news['link']}\n")
     
     content.append("="*50)
-    content.append(f"발송 일시: {datetime.now().strftime('%H:%M:%S')}")
 
     msg = MIMEMultipart()
     msg['From'], msg['To'] = CONFIG['GMAIL_USER'], CONFIG['GMAIL_USER']
-    msg['Subject'] = f"📅 [AI 요약 리포트] {today} - {topic}"
+    msg['Subject'] = f"📅 [AI 요약] {today} - {topic}"
     msg.attach(MIMEText("\n".join(content), 'plain'))
 
     with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
         server.login(CONFIG['GMAIL_USER'], CONFIG['GMAIL_PW'])
         server.sendmail(CONFIG['GMAIL_USER'], CONFIG['GMAIL_USER'], msg.as_string())
-    print("✅ 요약 포함 리포트 발송 완료!")
+    print("✅ 발송 완료")
