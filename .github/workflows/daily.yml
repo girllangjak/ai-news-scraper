@@ -2,8 +2,8 @@ name: Daily News Bot
 
 on:
   schedule:
-    - cron: '0 20 * * *' # 한국 시간 기준 매일 오전 7시 정각 실행
-  workflow_dispatch: # 관리자님이 원할 때 언제든 수동 실행 가능
+    - cron: '0 22 * * *' # 한국 시간(KST) 오전 7시 정각 실행
+  workflow_dispatch:
 
 jobs:
   build:
