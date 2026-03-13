@@ -5,20 +5,22 @@ on:
     - cron: '0 22 * * *' # 한국 시간(KST) 오전 7시 정각 실행
   workflow_dispatch:
 
+# Node.js 20 데프리케이션 경고 해결을 위한 환경 변수 주입
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4 # v4는 Node 24 환경을 지원합니다.
         with:
           token: ${{ secrets.GH_TOKEN }}
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v5 # v5는 Node 24 환경을 지원합니다.
         with:
           python-version: '3.10'
 
