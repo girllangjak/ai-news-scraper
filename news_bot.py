@@ -25,13 +25,13 @@ def clean_text(text):
     return re.sub('<.*?>|&([a-z0-9]+|#[0-9]{1,6}|#x[0-9a-f]{1,6});', '', text).strip()
 
 def call_gemini(prompt):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key={CONFIG['GEMINI_API_KEY']}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={CONFIG['GEMINI_API_KEY']}"
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
     try:
         res = requests.post(url, json=payload, timeout=60).json()
         return res['candidates'][0]['content']['parts'][0]['text'].strip()
     except:
-        return "⚠️ 대량 데이터 분석 중 지연이 발생했습니다. 하단 링크를 참조해 주세요."
+        return "⚠️ 분석 엔진 응답 지연이 발생했습니다."
 
 def get_target_topics():
     url = f"https://api.github.com/repos/{CONFIG['REPO']}/issues?state=open"
@@ -40,106 +40,101 @@ def get_target_topics():
         res = requests.get(url, headers=headers).json()
         if isinstance(res, list) and len(res) > 0:
             return [t.strip() for t in res[0]['title'].split(',') if t.strip()]
-        return ["오늘의 경제 뉴스"]
-    except: return ["오늘의 경제 뉴스"]
+        return ["안경 렌즈 산업"]
+    except: return ["안경 렌즈 산업"]
 
 def fetch_data(topics):
     combined_raw = []
     seen_titles = set()
-    
-    # [날짜 필터 설정] 오늘 기준 최근 3일 이내
     now = datetime.now()
-    three_days_ago = now - timedelta(days=3)
-    
-    # 글로벌 메이저 외신 쿼리
-    major_media = "(site:reuters.com OR site:bloomberg.com OR site:cnn.com OR site:bbc.com OR site:nytimes.com OR site:wsj.com OR site:apnews.com OR site:cnbc.com)"
+    cutoff_time = now - timedelta(days=3)
+    # [핵심] 검색어에 현재 연도를 명시하여 과거 데이터 유입 방지
+    current_year = now.year 
 
     for topic in topics:
-        # [네이버 뉴스] 정렬 순서를 'date'로 변경하여 최신성 보장
         n_url = f"https://openapi.naver.com/v1/search/news.json?query={quote(topic)}&display=30&sort=date"
         n_headers = {"X-Naver-Client-Id": CONFIG['NAVER_ID'], "X-Naver-Client-Secret": CONFIG['NAVER_SECRET']}
         try:
             n_res = requests.get(n_url, headers=n_headers, timeout=10).json().get('items', [])
             count = 0
             for item in n_res:
-                # 네이버 날짜 형식: "Fri, 13 Mar 2026 10:00:00 +0900"
                 pub_date = datetime.strptime(item['pubDate'], '%a, %d %b %Y %H:%M:%S +0900')
-                if pub_date < three_days_ago: continue # 3일 이전 기사 제외
+                if pub_date < cutoff_time: continue
                 
                 title = clean_text(item['title'])
                 if title[:12] in seen_titles or count >= 10: continue
-                
                 seen_titles.add(title[:12])
-                link = item['link']
-                source = "국내언론"
-                if "chosun.com" in link: source = "조선일보"
-                elif "joins.com" in link: source = "중앙일보"
-                elif "donga.com" in link: source = "동아일보"
-                elif "yna.co.kr" in link: source = "연합뉴스"
-                elif "hankyung.com" in link: source = "한국경제"
-                elif "mk.co.kr" in link: source = "매일경제"
                 
-                combined_raw.append({"source": source, "title": title, "desc": clean_text(item['description']), "link": link})
+                combined_raw.append({
+                    "source": "Pending", "title": title, 
+                    "date": pub_date.strftime('%Y-%m-%d %H:%M'), 
+                    "link": item.get('originallink') if item.get('originallink') else item['link']
+                })
                 count += 1
         except: pass
         
-        # [구글 외신 뉴스] 최근 3일 이내 기사만 검색하도록 쿼리에 'when:3d' 추가
-        g_query = f"{topic} {major_media} when:3d"
+        # 외신 검색 시에도 현재 시점(when:3d) 강력 제약
+        g_query = f"{topic} industry {now.year} when:3d"
         g_url = f"https://news.google.com/rss/search?q={quote(g_query)}&hl=en-US&gl=US&ceid=US:en"
         try:
             g_res = requests.get(g_url, timeout=15)
             root = ET.fromstring(g_res.text)
             count = 0
             for item in root.findall('.//item'):
-                # 구글 날짜 형식: "Fri, 13 Mar 2026 01:23:45 GMT"
                 pub_date_str = item.find('pubDate').text
-                pub_date = datetime.strptime(pub_date_str, '%a, %d %b %Y %H:%M:%S %Z')
-                if pub_date < three_days_ago: continue
+                try: pub_date = datetime.strptime(pub_date_str, '%a, %d %b %Y %H:%M:%S %Z')
+                except: pub_date = now
                 
+                if pub_date < cutoff_time: continue
+
                 title = item.find('title').text
                 if title[:12] in seen_titles or count >= 10: continue
-                
                 seen_titles.add(title[:12])
-                source = title.split(" - ")[-1] if " - " in title else "Mainstream"
-                combined_raw.append({"source": source, "title": title, "desc": "", "link": item.find('link').text})
+                
+                source = title.split(" - ")[-1] if " - " in title else "Global"
+                combined_raw.append({
+                    "source": source, "title": title.split(" - ")[0], 
+                    "date": pub_date.strftime('%Y-%m-%d'), "link": item.find('link').text
+                })
                 count += 1
         except: pass
     return combined_raw
 
 if __name__ == "__main__":
+    today_now = datetime.now().strftime('%Y-%m-%d %H:%M')
     topics = get_target_topics()
     news_list = fetch_data(topics)
     
-    # 20개 내외의 데이터를 기반으로 정교한 분석 요청
+    # [프롬프트 강화] 현재 시점을 엄격히 규정
     prompt = f"""
-    당신은 글로벌 전략 분석가입니다. 아래 {len(news_list)}개의 최신 뉴스(최근 3일 이내)를 분석하여 리포트를 작성하세요.
+    당신은 2026년에 근무하는 글로벌 산업 분석 비서입니다. 
+    오늘은 {today_now}입니다.
     
-    [분석 주제]: {', '.join(topics)}
-    [데이터]: {json.dumps(news_list, ensure_ascii=False)}
+    [제공 데이터]: {json.dumps(news_list, ensure_ascii=False)}
     
-    [작성 양식]:
-    1. 인사이트: 최근 3일간의 긴박한 흐름을 바탕으로 국내외 보도 차이와 시사점을 전문적으로 분석.
-    2. 뉴스 분석: 중복 없이 핵심 기사들을 선정해 아래 형식 준수.
-       - [신문사] 기사제목
-       📌 요약: [한국어 한 문장 핵심 요약]
+    [작성 규칙 - 필독]:
+    1. 절대 2024년이나 2025년 데이터를 '최근'이라고 언급하지 마세요. 
+    2. 오직 제공된 데이터({len(news_list)}건)만 분석하세요. 데이터가 부족하면 부족한 대로 작성하세요.
+    3. 제목: 📅 {topics[0]} 산업 분석 보고
+    4. [Insight]: 2026년 3월 현재 시점의 핵심 흐름 분석.
+    5. [뉴스 본문 분석]: 
+       - '[언론사] (게시일자) 제목' 및 '📌 [내용]' 형식 준수.
+       - 외신은 반드시 한국어로 번역.
+       - 소스가 'Pending'인 경우 도메인을 보고 언론사명을 식별하세요.
     """
     
     final_report = call_gemini(prompt)
 
-    # [참조 링크 모음] 포맷 적용
-    footer = "\n\n🔗 [심층 참조 링크 모음 (최근 3일 데이터)]\n"
+    footer = "\n\n🔗 [링크 모음]\n"
     for item in news_list:
-        clean_title = item['title'].split(" - ")[0] if " - " in item['title'] else item['title']
-        footer += f"- {item['source']} - {clean_title[:35]}... : {item['link']}\n"
+        domain = item['link'].split('/')[2].replace('www.', '')
+        footer += f"- {item['source'] if item['source'] != 'Pending' else domain} - ({item['date']}) {item['title'][:35]}... : {item['link']}\n"
         
-    today = datetime.now().strftime('%Y-%m-%d')
-    msg = MIMEMultipart()
-    msg['From'] = msg['To'] = CONFIG['GMAIL_USER']
-    msg['Subject'] = f"📅 [Deep Insight] {today} - {topics[0]} (최근 3일 집중분석)"
+    msg = MIMEMultipart(); msg['From'] = msg['To'] = CONFIG['GMAIL_USER']
+    msg['Subject'] = f"📅 [7AM Report] {datetime.now().strftime('%Y-%m-%d')} - {topics[0]} 분석"
     msg.attach(MIMEText(final_report + footer, 'plain'))
     
     with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
         server.login(CONFIG['GMAIL_USER'], CONFIG['GMAIL_PW'])
         server.sendmail(CONFIG['GMAIL_USER'], CONFIG['GMAIL_USER'], msg.as_string())
-        
-    print(f"✅ 리포트 발송 완료: 최근 3일 이내 기사 {len(news_list)}건 분석")
+    print(f"✅ {today_now} 기준 보고서 발송 완료")
