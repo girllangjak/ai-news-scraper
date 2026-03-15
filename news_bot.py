@@ -9,7 +9,7 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
 from urllib.parse import quote
 
-# 환경 설정
+# 1. 환경 설정 (GitHub Secrets와 연동)
 CONFIG = {
     "NAVER": {"ID": os.environ.get("NAVER_ID"), "SEC": os.environ.get("NAVER_SECRET")},
     "MAIL": {"USER": os.environ.get("GMAIL_USER"), "PW": os.environ.get("GMAIL_PW")},
@@ -26,58 +26,41 @@ def get_issue_topic():
     headers = {"Authorization": f"token {CONFIG['GH_TOKEN']}"}
     try:
         res = requests.get(url, headers=headers).json()
-        return res[0]['title'] if res else "이란 전쟁"
-    except: return "이란 전쟁"
+        return res[0]['title'] if res else "정보기술 정세"
+    except: return "정보기술 정세"
 
 def call_gemini(prompt):
     """
-    모든 오류를 상세히 노출하는 분석 함수
+    Gemini 3 Flash 엔진을 호출하는 최종 안정화 함수
     """
-    # 현재 가장 유력한 v1beta 엔드포인트
+    # 2026년 기준 가장 안정적인 v1beta 경로와 모델명 사용
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={CONFIG['GEMINI_KEY']}"
     
     headers = {'Content-Type': 'application/json'}
-    payload = {"contents": [{"parts": [{"text": prompt}]}]}
-    
-    debug_info = {
-        "request_url": url.replace(CONFIG['GEMINI_KEY'], "REDACTED_KEY"),
-        "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}]
     }
-
+    
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=60)
-        status_code = response.status_code
+        res_data = response.json()
         
-        try:
-            res_data = response.json()
-        except:
-            res_data = {"raw_text": response.text}
-
-        # 1. 성공 시
-        if status_code == 200 and 'candidates' in res_data:
+        # 정상 응답 추출
+        if response.status_code == 200 and 'candidates' in res_data:
             return res_data['candidates'][0]['content']['parts'][0]['text'].strip()
         
-        # 2. 실패 시 - 오류 내용을 상세하게 구성
-        error_report = [
-            "❌ [Gemini API 호출 실패 보고서]",
-            f"1. HTTP Status: {status_code}",
-            f"2. Debug Context: {json.dumps(debug_info)}",
-            "3. Full Response Data:",
-            json.dumps(res_data, indent=2, ensure_ascii=False),
-            "-------------------------------------------",
-            "위 내용을 복사해서 Gemini에게 전달해 주세요."
-        ]
-        return "\n".join(error_report)
+        # 에러 발생 시 리포트 본문에 에러 노출
+        return f"⚠️ AI 분석 일시적 오류 (HTTP {response.status_code})\n사유: {res_data.get('error', {}).get('message', 'Unknown Error')}"
 
     except Exception as e:
-        return f"❌ 시스템 치명적 예외 발생: {str(e)}"
+        return f"⚠️ 시스템 네트워크 오류: {str(e)}"
 
 def fetch_news(topic):
     news_data = []
     seen = set()
     limit_time = datetime.now() - timedelta(days=3)
 
-    # 네이버
+    # 네이버 뉴스 검색
     n_url = f"https://openapi.naver.com/v1/search/news.json?query={quote(topic)}&display=30&sort=date"
     n_headers = {"X-Naver-Client-Id": CONFIG['NAVER']['ID'], "X-Naver-Client-Secret": CONFIG['NAVER']['SEC']}
     try:
@@ -88,11 +71,11 @@ def fetch_news(topic):
             title = clean_html(it['title'])
             if title[:15] not in seen:
                 seen.add(title[:15])
-                news_data.append({"src": "Pending", "title": title, "date": p_date.strftime('%Y-%m-%d'), "link": it['link']})
+                news_data.append({"src": "네이버뉴스", "title": title, "date": p_date.strftime('%Y-%m-%d'), "link": it['link']})
     except: pass
 
-    # 구글
-    g_query = f"{topic} news when:3d"
+    # 구글 외신 검색
+    g_query = f"{topic} market news when:3d"
     g_url = f"https://news.google.com/rss/search?q={quote(g_query)}&hl=en-US&gl=US&ceid=US:en"
     try:
         root = ET.fromstring(requests.get(g_url, timeout=20).text)
@@ -112,25 +95,40 @@ if __name__ == "__main__":
     collected = fetch_news(target)
 
     if not collected:
-        report_body = "최근 3일간 수집된 데이터가 없습니다."
+        report_body = "최근 72시간 내 수집된 관련 뉴스가 없습니다."
     else:
-        prompt = f"다음 뉴스를 한국어로 요약해. 데이터:\n{json.dumps(collected[:15], ensure_ascii=False)}"
+        prompt = f"""
+        당신은 Gemini 3 기반 전문 분석관입니다. 아래 뉴스 데이터를 한국어로 요약하세요.
+        
+        [데이터]: {json.dumps(collected[:15], ensure_ascii=False)}
+        
+        [양식]:
+        📅 {target} 정세 보고
+        [Insight]
+        현 정세를 관통하는 핵심 분석 한 줄
+        
+        [뉴스 분석]
+        [언론사명] (날짜) 제목
+        📌 핵심 요약 (한국어 한 줄)
+        """
         report_body = call_gemini(prompt)
 
-    links = "\n\n🔗 [수집된 원문 리스트]\n"
+    # 링크 모음 생성
+    links = "\n\n🔗 [참조 링크]\n"
     for c in collected:
-        domain = c['link'].split('/')[2].replace('www.', '')
-        links += f"- {c['src'] if c['src'] != 'Pending' else domain}: {c['link']}\n"
+        links += f"- {c['src']} ({c['date']}): {c['title'][:40]}... > {c['link']}\n"
 
+    # 메일 구성
     msg = MIMEMultipart()
-    msg['Subject'] = f"📅 [Debug Report] {today} - {target} 분석 시도"
+    msg['Subject'] = f"📅 [7AM Report] {today} - {target} 정세 분석"
     msg['From'] = msg['To'] = CONFIG['MAIL']['USER']
     msg.attach(MIMEText(report_body + links, 'plain'))
 
+    # SMTP 전송
     try:
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
             server.login(CONFIG['MAIL']['USER'], CONFIG['MAIL']['PW'])
             server.sendmail(CONFIG['MAIL']['USER'], CONFIG['MAIL']['USER'], msg.as_string())
-        print(f"✅ {today} 프로세스 완료")
+        print(f"✅ {today} 보고서 전송 완료")
     except Exception as e:
-        print(f"❌ 메일 전송 실패: {e}")
+        print(f"❌ 전송 실패: {e}")
