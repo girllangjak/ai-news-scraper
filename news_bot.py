@@ -9,7 +9,7 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
 from urllib.parse import quote
 
-# 2026년 최신 모델 리스트
+# 최신 모델 설정
 MODEL_PRIORITY = ["gemini-2.5-flash", "gemini-3-flash-preview", "gemini-1.5-flash-latest"]
 
 CONFIG = {
@@ -20,105 +20,99 @@ CONFIG = {
     "REPO": "girllangjak/ai-news-scraper"
 }
 
-def clean_html(text):
-    return re.sub('<.*?>|&([a-z0-9]+|#[0-9]{1,6});', '', text).strip() if text else ""
-
-def get_issue_topic():
-    print(f"📡 GitHub API 호출 중: {CONFIG['REPO']}")
-    url = f"https://api.github.com/repos/{CONFIG['REPO']}/issues?state=open"
-    headers = {"Authorization": f"token {CONFIG['GH_TOKEN']}"}
-    try:
-        res = requests.get(url, headers=headers)
-        print(f"🔎 GitHub 응답 코드: {res.status_code}")
-        issues = res.json()
-        if isinstance(issues, list) and len(issues) > 0:
-            return issues[0]['title']
-        return None
-    except Exception as e:
-        print(f"❌ GitHub 호출 에러: {e}")
-        return None
-
-def call_gemini(prompt):
+def call_gemini(prompt, is_json=False):
+    """Gemini API 호출 (언어 및 출력 형식 제어)"""
     for model in MODEL_PRIORITY:
-        print(f"🧠 Gemini 호출 시도 중... (모델: {model})")
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={CONFIG['GEMINI_KEY']}"
-        headers = {'Content-Type': 'application/json'}
-        payload = {"contents": [{"parts": [{"text": f"반드시 한국어로 응답해라: {prompt}"}]}]}
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"response_mime_type": "application/json"} if is_json else {}
+        }
         try:
-            response = requests.post(url, headers=headers, json=payload, timeout=40)
-            if response.status_code == 200:
-                print(f"✅ Gemini 응답 성공 ({model})")
-                return response.json()['candidates'][0]['content']['parts'][0]['text'].strip(), True
-            print(f"⚠️ {model} 실패: {response.status_code}")
-        except Exception as e:
-            print(f"⚠️ {model} 에러: {e}")
-            continue
-    return "분석 실패", False
+            res = requests.post(url, json=payload, timeout=40)
+            if res.status_code == 200:
+                return res.json()['candidates'][0]['content']['parts'][0]['text'].strip(), True
+        except: continue
+    return "", False
 
-def fetch_news(topic):
-    news_data = {"KR": [], "Global": []}
-    seen_titles = set()
-    limit_time = datetime.now() - timedelta(days=3)
-    print(f"📰 뉴스 수집 시작: '{topic}' (기준: {limit_time})")
-
-    # 국내 (네이버)
+def get_target_countries(topic):
+    """AI가 키워드를 보고 연관 국가와 언어 코드를 추천"""
+    prompt = f"""
+    키워드 '{topic}'와(과) 가장 밀접한 관련이 있는 국가 3곳을 선정하고 해당 국가의 언어코드(hl)와 지역코드(gl)를 JSON 형식으로 반환해줘.
+    예: {{"countries": [{{"name": "Israel", "hl": "iw", "gl": "IL"}}, {{"name": "Iran", "hl": "fa", "gl": "IR"}}]}}
+    반드시 이 JSON 형식만 출력해.
+    """
+    res, success = call_gemini(prompt, is_json=True)
     try:
-        n_url = f"https://openapi.naver.com/v1/search/news.json?query={quote(topic)}&display=20&sort=date"
-        n_headers = {"X-Naver-Client-Id": CONFIG['NAVER']['ID'], "X-Naver-Client-Secret": CONFIG['NAVER']['SEC']}
-        items = requests.get(n_url, headers=n_headers).json().get('items', [])
-        for it in items:
-            title = clean_html(it['title'])
-            if title[:15] not in seen_titles and len(news_data["KR"]) < 5:
-                seen_titles.add(title[:15])
-                news_data["KR"].append({"src": "국내", "title": title, "link": it['link']})
-        print(f"   - 국내 기사 수집 완료: {len(news_data['KR'])}개")
-    except Exception as e:
-        print(f"   - 네이버 호출 에러: {e}")
+        return json.loads(res).get("countries", []) if success else []
+    except: return []
 
-    # 해외 (구글)
+def fetch_global_news(topic, countries):
+    """국가별 현지 언어로 뉴스 수집"""
+    global_news = []
+    for c in countries:
+        print(f"🌍 {c['name']} 현지 뉴스 수집 중... ({c['hl']}-{c['gl']})")
+        # 구글 뉴스 RSS (3일 이내 제한)
+        g_url = f"https://news.google.com/rss/search?q={quote(topic)}+when:3d&hl={c['hl']}&gl={c['gl']}&ceid={c['gl']}:{c['hl']}"
+        try:
+            res = requests.get(g_url, timeout=20)
+            root = ET.fromstring(res.text)
+            for it in root.findall('.//item')[:3]: # 국가당 상위 3개
+                global_news.append({
+                    "country": c['name'],
+                    "title": it.find('title').text,
+                    "link": it.find('link').text
+                })
+        except: continue
+    return global_news
+
+def fetch_naver_news(topic):
+    """국내 뉴스 수집"""
+    url = f"https://openapi.naver.com/v1/search/news.json?query={quote(topic)}&display=5&sort=date"
+    headers = {"X-Naver-Client-Id": CONFIG['NAVER']['ID'], "X-Naver-Client-Secret": CONFIG['NAVER']['SEC']}
     try:
-        g_query = f'"{topic}" (lens OR brand) when:3d'
-        g_url = f"https://news.google.com/rss/search?q={quote(g_query)}&hl=en-US&gl=US&ceid=US:en"
-        res = requests.get(g_url)
-        root = ET.fromstring(res.text)
-        for it in root.findall('.//item')[:10]:
-            title = it.find('title').text
-            if len(news_data["Global"]) < 5:
-                news_data["Global"].append({"src": "외신", "title": title, "link": it.find('link').text})
-        print(f"   - 해외 기사 수집 완료: {len(news_data['Global'])}개")
-    except Exception as e:
-        print(f"   - 구글 호출 에러: {e}")
-    
-    return news_data
+        items = requests.get(url, headers=headers).json().get('items', [])
+        return [{"src": "국내", "title": re.sub('<.*?>', '', it['title']), "link": it['link']} for it in items]
+    except: return []
 
 if __name__ == "__main__":
-    print("--- 봇 가동 시작 ---")
-    target = get_issue_topic()
-    print(f"📌 최종 키워드: {target}")
+    # 1. 키워드 획득 (GitHub Issue)
+    issue_url = f"https://api.github.com/repos/{CONFIG['REPO']}/issues?state=open"
+    issues = requests.get(issue_url, headers={"Authorization": f"token {CONFIG['GH_TOKEN']}"}).json()
+    
+    if issues and isinstance(issues, list):
+        topic = issues[0]['title']
+        print(f"🚀 분석 시작: {topic}")
 
-    if not target:
-        print("🛑 종료: 처리할 키워드가 없습니다. (GitHub Issues 확인 요망)")
-    else:
-        news = fetch_news(target)
-        all_items = news["KR"] + news["Global"]
+        # 2. 연관 국가 선정 및 뉴스 수집
+        target_countries = get_target_countries(topic)
+        kr_news = fetch_naver_news(topic)
+        intl_news = fetch_global_news(topic, target_countries)
         
-        if not all_items:
-            print(f"🛑 종료: '{target}'에 대한 최근 3일치 기사가 0개입니다.")
-        else:
-            print(f"🔄 총 {len(all_items)}개 기사 분석 시작...")
-            res_text, success = call_gemini(json.dumps(all_items, ensure_ascii=False))
+        all_data = {"domestic": kr_news, "international": intl_news}
+
+        # 3. AI 심층 분석 (번역 및 요약)
+        analysis_prompt = f"""
+        주제: {topic}
+        다음은 한국 및 관련 국가들({[c['name'] for c in target_countries]})의 현지 뉴스 데이터야.
+        
+        지침:
+        1. 각 국가별(현지 시각) 뉴스를 한국어로 번역하고 핵심 내용을 요약해줘.
+        2. 국내 보도와 현지 보도의 온도 차이나 시각 차이를 비교 분석해줘.
+        3. 마지막에 전체적인 상황을 3줄로 결론지어줘.
+        
+        데이터: {json.dumps(all_data, ensure_ascii=False)}
+        """
+        report, success = call_gemini(analysis_prompt)
+
+        if success:
+            # 4. 이메일 발송
+            msg = MIMEMultipart()
+            msg['Subject'] = f"🌐 [글로벌 리포트] {topic}"
+            msg['From'] = msg['To'] = CONFIG['MAIL']['USER']
+            msg.attach(MIMEText(report + "\n\n--- 수집 링크 ---\n" + "\n".join([f"- {n['title']}: {n['link']}" for n in kr_news + intl_news]), 'plain'))
             
-            if success:
-                print("📨 메일 발송 중...")
-                msg = MIMEMultipart()
-                msg['Subject'] = f"📅 [완료] {target} 글로벌 분석"
-                msg['From'] = msg['To'] = CONFIG['MAIL']['USER']
-                msg.attach(MIMEText(res_text, 'plain'))
-                
-                with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
-                    server.login(CONFIG['MAIL']['USER'], CONFIG['MAIL']['PW'])
-                    server.sendmail(CONFIG['MAIL']['USER'], CONFIG['MAIL']['USER'], msg.as_string())
-                print("✅ 모든 작업이 완료되었습니다!")
-            else:
-                print("❌ 분석 결과 생성 실패로 메일을 보내지 못했습니다.")
-    print("--- 봇 가동 종료 ---")
+            with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+                server.login(CONFIG['MAIL']['USER'], CONFIG['MAIL']['PW'])
+                server.sendmail(CONFIG['MAIL']['USER'], CONFIG['MAIL']['USER'], msg.as_string())
+            print("✅ 분석 리포트 발송 완료!")
