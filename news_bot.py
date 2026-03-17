@@ -6,7 +6,7 @@ import json
 import re
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
 # 최신 모델 설정
@@ -21,7 +21,6 @@ CONFIG = {
 }
 
 def call_gemini(prompt, is_json=False):
-    """Gemini API 호출 (언어 및 출력 형식 제어)"""
     for model in MODEL_PRIORITY:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={CONFIG['GEMINI_KEY']}"
         payload = {
@@ -36,83 +35,80 @@ def call_gemini(prompt, is_json=False):
     return "", False
 
 def get_target_countries(topic):
-    """AI가 키워드를 보고 연관 국가와 언어 코드를 추천"""
-    prompt = f"""
-    키워드 '{topic}'와(과) 가장 밀접한 관련이 있는 국가 3곳을 선정하고 해당 국가의 언어코드(hl)와 지역코드(gl)를 JSON 형식으로 반환해줘.
-    예: {{"countries": [{{"name": "Israel", "hl": "iw", "gl": "IL"}}, {{"name": "Iran", "hl": "fa", "gl": "IR"}}]}}
-    반드시 이 JSON 형식만 출력해.
-    """
+    """AI를 통해 키워드 관련 국가 3곳 선정"""
+    prompt = f"'{topic}'와 밀접한 국가 3곳과 언어(hl), 지역(gl) 코드를 JSON으로 줘. 예: {{\"countries\": [{{ \"name\": \"Israel\", \"hl\": \"iw\", \"gl\": \"IL\" }}]}}"
     res, success = call_gemini(prompt, is_json=True)
+    try: return json.loads(res).get("countries", []) if success else []
+    except: return []
+
+def fetch_naver_news(topic):
+    """국내 뉴스: 3일 이내 기사만 필터링"""
+    url = f"https://openapi.naver.com/v1/search/news.json?query={quote(topic)}&display=20&sort=date"
+    headers = {"X-Naver-Client-Id": CONFIG['NAVER']['ID'], "X-Naver-Client-Secret": CONFIG['NAVER']['SEC']}
+    news_list = []
+    limit = datetime.now(timezone.utc) - timedelta(days=3)
+    
     try:
-        return json.loads(res).get("countries", []) if success else []
+        items = requests.get(url, headers=headers).json().get('items', [])
+        for it in items:
+            # 네이버 pubDate: Tue, 17 Mar 2026 10:00:00 +0900
+            p_date = datetime.strptime(it['pubDate'], '%a, %d %b %Y %H:%M:%S +0900').replace(tzinfo=timezone(timedelta(hours=9)))
+            if p_date >= limit:
+                news_list.append({"src": "국내", "title": re.sub('<.*?>', '', it['title']), "link": it['link']})
+        return news_list[:5]
     except: return []
 
 def fetch_global_news(topic, countries):
-    """국가별 현지 언어로 뉴스 수집"""
+    """해외 뉴스: 현지 언어 검색 및 3일 이내 필터링"""
     global_news = []
+    limit = datetime.now(timezone.utc) - timedelta(days=3)
+    
     for c in countries:
-        print(f"🌍 {c['name']} 현지 뉴스 수집 중... ({c['hl']}-{c['gl']})")
-        # 구글 뉴스 RSS (3일 이내 제한)
         g_url = f"https://news.google.com/rss/search?q={quote(topic)}+when:3d&hl={c['hl']}&gl={c['gl']}&ceid={c['gl']}:{c['hl']}"
         try:
-            res = requests.get(g_url, timeout=20)
-            root = ET.fromstring(res.text)
-            for it in root.findall('.//item')[:3]: # 국가당 상위 3개
-                global_news.append({
-                    "country": c['name'],
-                    "title": it.find('title').text,
-                    "link": it.find('link').text
-                })
+            root = ET.fromstring(requests.get(g_url, timeout=20).text)
+            for it in root.findall('.//item')[:3]:
+                # 구글 pubDate: Tue, 17 Mar 2026 01:00:00 GMT
+                g_date = datetime.strptime(it.find('pubDate').text, '%a, %d %b %Y %H:%M:%S GMT').replace(tzinfo=timezone.utc)
+                if g_date >= limit:
+                    global_news.append({"country": c['name'], "title": it.find('title').text, "link": it.find('link').text})
         except: continue
     return global_news
 
-def fetch_naver_news(topic):
-    """국내 뉴스 수집"""
-    url = f"https://openapi.naver.com/v1/search/news.json?query={quote(topic)}&display=5&sort=date"
-    headers = {"X-Naver-Client-Id": CONFIG['NAVER']['ID'], "X-Naver-Client-Secret": CONFIG['NAVER']['SEC']}
-    try:
-        items = requests.get(url, headers=headers).json().get('items', [])
-        return [{"src": "국내", "title": re.sub('<.*?>', '', it['title']), "link": it['link']} for it in items]
-    except: return []
-
 if __name__ == "__main__":
-    # 1. 키워드 획득 (GitHub Issue)
+    # GitHub 이슈에서 주제 가져오기
     issue_url = f"https://api.github.com/repos/{CONFIG['REPO']}/issues?state=open"
-    issues = requests.get(issue_url, headers={"Authorization": f"token {CONFIG['GH_TOKEN']}"}).json()
+    res = requests.get(issue_url, headers={"Authorization": f"token {CONFIG['GH_TOKEN']}"}).json()
     
-    if issues and isinstance(issues, list):
-        topic = issues[0]['title']
-        print(f"🚀 분석 시작: {topic}")
-
-        # 2. 연관 국가 선정 및 뉴스 수집
-        target_countries = get_target_countries(topic)
-        kr_news = fetch_naver_news(topic)
-        intl_news = fetch_global_news(topic, target_countries)
+    if res and isinstance(res, list):
+        topic = res[0]['title']
+        countries = get_target_countries(topic)
         
+        kr_news = fetch_naver_news(topic)
+        intl_news = fetch_global_news(topic, countries)
+        
+        # 분석 요청 (해외 뉴스 부재 시 처리 지침 포함)
         all_data = {"domestic": kr_news, "international": intl_news}
-
-        # 3. AI 심층 분석 (번역 및 요약)
         analysis_prompt = f"""
         주제: {topic}
-        다음은 한국 및 관련 국가들({[c['name'] for c in target_countries]})의 현지 뉴스 데이터야.
+        기사 데이터: {json.dumps(all_data, ensure_ascii=False)}
         
         지침:
-        1. 각 국가별(현지 시각) 뉴스를 한국어로 번역하고 핵심 내용을 요약해줘.
-        2. 국내 보도와 현지 보도의 온도 차이나 시각 차이를 비교 분석해줘.
-        3. 마지막에 전체적인 상황을 3줄로 결론지어줘.
-        
-        데이터: {json.dumps(all_data, ensure_ascii=False)}
+        1. 한국어로 작성. 72시간 이내의 최신 기사만 분석에 포함할 것.
+        2. 해외 기사가 없다면 '해외 현지 보도 없음'으로 간략히 표기.
+        3. 주제와 무관한 기사(예: 유명인 단순 근황 등)는 분석에서 배제할 것.
+        4. 국내와 해외 시각 차이를 분석하고 3줄 결론을 낼 것.
         """
         report, success = call_gemini(analysis_prompt)
 
         if success:
-            # 4. 이메일 발송
             msg = MIMEMultipart()
-            msg['Subject'] = f"🌐 [글로벌 리포트] {topic}"
+            msg['Subject'] = f"🌐 [글로벌 리포트] {topic} ({datetime.now().strftime('%m/%d')})"
             msg['From'] = msg['To'] = CONFIG['MAIL']['USER']
-            msg.attach(MIMEText(report + "\n\n--- 수집 링크 ---\n" + "\n".join([f"- {n['title']}: {n['link']}" for n in kr_news + intl_news]), 'plain'))
+            ref_links = "\n".join([f"- {n['title']}: {n['link']}" for n in kr_news + intl_news])
+            msg.attach(MIMEText(f"{report}\n\n--- 수집 링크 ---\n{ref_links}", 'plain'))
             
             with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
                 server.login(CONFIG['MAIL']['USER'], CONFIG['MAIL']['PW'])
                 server.sendmail(CONFIG['MAIL']['USER'], CONFIG['MAIL']['USER'], msg.as_string())
-            print("✅ 분석 리포트 발송 완료!")
+            print(f"✅ {topic} 리포트 발송 완료")
