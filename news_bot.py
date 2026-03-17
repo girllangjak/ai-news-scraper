@@ -9,7 +9,7 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
 from urllib.parse import quote
 
-# 1. 2026년 최신 모델 리스트 (우선순위 순)
+# 모델 우선순위 유지
 MODEL_PRIORITY = ["gemini-2.5-flash", "gemini-3-flash-preview", "gemini-1.5-flash-latest"]
 
 CONFIG = {
@@ -32,58 +32,61 @@ def get_issue_topic():
     except: return None
 
 def call_gemini(prompt):
-    """
-    [완결판] 사용 가능한 모델을 순차적으로 시도하여 404를 원천 봉쇄함.
-    실패 시에는 기술적 디버깅 정보만 극도로 상세히 메일링함.
-    """
-    last_error = ""
+    """지침: 반드시 한국어로 응답하도록 프롬프트 제어 강화"""
     for model in MODEL_PRIORITY:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={CONFIG['GEMINI_KEY']}"
         headers = {'Content-Type': 'application/json'}
-        payload = {"contents": [{"parts": [{"text": prompt}]}]}
-        
+        # 응답 언어를 한국어로 고정하는 시스템 지침 추가
+        payload = {
+            "contents": [{"parts": [{"text": f"너는 전문 뉴스 분석가야. 반드시 한국어로만 응답해. 지침: {prompt}"}]}],
+            "generationConfig": {"temperature": 0.2, "topP": 0.8} # 요약 품질을 위해 창의성 낮춤
+        }
         try:
-            response = requests.post(url, headers=headers, json=payload, timeout=30)
+            response = requests.post(url, headers=headers, json=payload, timeout=40)
             res_data = response.json()
             if response.status_code == 200:
                 return res_data['candidates'][0]['content']['parts'][0]['text'].strip(), True
-            last_error = f"Model {model} failed: {json.dumps(res_data)}"
-        except Exception as e:
-            last_error = str(e)
-            continue
-
-    # 모든 모델 실패 시 상세 리포트 생성
-    error_report = [
-        "🚨 [ULTIMATE DEBUG REPORT - ALL MODELS FAILED]",
-        f"TIMESTAMP: {datetime.now().isoformat()}",
-        f"TRIED_MODELS: {MODEL_PRIORITY}",
-        f"LAST_RESPONSE: {last_error}",
-        "CHECK_LIST: 1. API_KEY valid? 2. Billing enabled? 3. Regional restriction?"
-    ]
-    return "\n".join(error_report), False
+        except: continue
+    return "API 호출 실패", False
 
 def fetch_news(topic):
-    # (기존 뉴스 수집 로직과 동일하되, 중복 제거 강화)
+    """
+    1. 검색 범위를 '3일 이내'로 강제 제한
+    2. 무관한 뉴스 배제를 위해 키워드 조합 최적화
+    """
     news_data = {"KR": [], "Global": []}
     seen_titles = set()
-    limit_time = datetime.now() - timedelta(days=3)
+    # 날짜 기준 설정 (3일 전)
+    days_3_ago = datetime.now() - timedelta(days=3)
 
-    # 국내 (네이버)
+    # [국내] 네이버: 정렬을 'sim'이 아닌 'date'로 고정하여 최신성 확보
+    n_url = f"https://openapi.naver.com/v1/search/news.json?query={quote(topic)}&display=30&sort=date"
     n_headers = {"X-Naver-Client-Id": CONFIG['NAVER']['ID'], "X-Naver-Client-Secret": CONFIG['NAVER']['SEC']}
-    n_res = requests.get(f"https://openapi.naver.com/v1/search/news.json?query={quote(topic)}&display=20", headers=n_headers).json()
-    for it in n_res.get('items', []):
-        title = clean_html(it['title'])
-        if title[:15] not in seen_titles and len(news_data["KR"]) < 5:
-            seen_titles.add(title[:15]); news_data["KR"].append({"src": "국내", "title": title, "link": it['link']})
+    try:
+        items = requests.get(n_url, headers=n_headers, timeout=20).json().get('items', [])
+        for it in items:
+            p_date = datetime.strptime(it['pubDate'], '%a, %d %b %Y %H:%M:%S +0900')
+            title = clean_html(it['title'])
+            # 3일 이내 기사만 통과
+            if p_date > days_3_ago and title[:15] not in seen_titles and len(news_data["KR"]) < 5:
+                seen_titles.add(title[:15])
+                news_data["KR"].append({"src": "국내", "title": title, "link": it['link']})
+    except: pass
 
-    # 해외 (구글 뉴스 RSS + 공신력 필터)
-    domains = " OR ".join([f"site:{d}" for d in ["reuters.com", "bloomberg.com", "wsj.com", "ft.com"]])
-    g_url = f"https://news.google.com/rss/search?q={quote(topic + ' ' + domains)}&hl=en-US"
-    root = ET.fromstring(requests.get(g_url).text)
-    for it in root.findall('.//item')[:15]:
-        title = it.find('title').text
-        if title[:15] not in seen_titles and len(news_data["Global"]) < 5:
-            seen_titles.add(title[:15]); news_data["Global"].append({"src": "외신", "title": title, "link": it.find('link').text})
+    # [해외] 구글 뉴스: 쿼리 필터링 강화 (3일 이내 & 키워드 매칭)
+    # 기사 내용에 'lens'나 'k-beauty'가 포함되도록 쿼리 보정
+    g_query = f'"{topic}" (lens OR brand OR model) when:3d'
+    g_url = f"https://news.google.com/rss/search?q={quote(g_query)}&hl=en-US&gl=US&ceid=US:en"
+    try:
+        root = ET.fromstring(requests.get(g_url, timeout=20).text)
+        for it in root.findall('.//item'):
+            title = it.find('title').text
+            # 구글 RSS의 pubDate 파싱 및 필터링
+            g_pub_date = datetime.strptime(it.find('pubDate').text, '%a, %d %b %Y %H:%M:%S GMT')
+            if g_pub_date > (days_3_ago - timedelta(hours=9)) and title[:15] not in seen_titles and len(news_data["Global"]) < 5:
+                seen_titles.add(title[:15])
+                news_data["Global"].append({"src": "외신", "title": title.split(" - ")[0], "link": it.find('link').text})
+    except: pass
     
     return news_data
 
@@ -93,16 +96,23 @@ if __name__ == "__main__":
         news = fetch_news(target)
         all_items = news["KR"] + news["Global"]
         if all_items:
-            # 분석 요청
-            res_text, success = call_gemini(f"Analyze these news about '{target}': {json.dumps(all_items, ensure_ascii=False)}")
+            # 상세 분석 지침 (한국어 고정 및 요약 수준 상향)
+            prompt = f"""
+            주제 '{target}'에 대해 수집된 다음 기사들을 분석하라.
+            지침:
+            1. 반드시 '한국어'로 작성할 것.
+            2. 단순 나열이 아닌, 국내와 해외의 시각 차이를 중심으로 심층 분석할 것.
+            3. 각 섹션별로 3문장 이상의 구체적인 요약을 제공할 것.
+            4. 관련 없는 기사는 분석에서 제외할 것.
             
-            # 이메일 발송
+            데이터: {json.dumps(all_items, ensure_ascii=False)}
+            """
+            res_text, success = call_gemini(prompt)
+            
             msg = MIMEMultipart()
-            msg['Subject'] = f"{'📅' if success else '🚨'} News Report: {target}"
+            msg['Subject'] = f"📅 [분석완료] {target} 글로벌 뉴스 리포트"
             msg['From'] = msg['To'] = CONFIG['MAIL']['USER']
-            
-            # 실패 시 리포트만, 성공 시 분석+참조링크
-            body = res_text if not success else f"{res_text}\n\n🔗 [Reference]\n" + "\n".join([f"- {n['title']}: {n['link']}" for n in all_items])
+            body = res_text + "\n\n🔗 [참조 링크]\n" + "\n".join([f"- {n['title']}: {n['link']}" for n in all_items])
             msg.attach(MIMEText(body, 'plain'))
 
             with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
