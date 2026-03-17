@@ -10,137 +10,154 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
-# [모델 설정]
-MODEL_PRIORITY = ["gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"]
+# ==========================================
+# [설정 섹션] 관리자님의 정보를 입력해주세요
+# ==========================================
+# 1. 확인된 2026년 최신 모델 우선순위
+MODEL_PRIORITY = [
+    "gemini-3.1-flash-lite-preview", # 최우선 (2026-03)
+    "gemini-3.1-pro-preview",        # 차선 (2026-01)
+    "gemini-2.5-flash"               # 백업
+]
 
-CONFIG = {
-    "NAVER": {"ID": os.environ.get("NAVER_ID"), "SEC": os.environ.get("NAVER_SECRET")},
-    "MAIL": {"USER": os.environ.get("GMAIL_USER"), "PW": os.environ.get("GMAIL_PW")},
-    "GEMINI_KEY": os.environ.get("GEMINI_API_KEY"),
-    "GH_TOKEN": os.environ.get("GH_TOKEN"),
+# 2. 필수 인증 정보
+CREDENTIALS = {
+    "GEMINI_KEY": "여기에_GEMINI_API_키를_넣으세요",
+    "NAVER_ID": "여기에_네이버_클라이언트_ID",
+    "NAVER_SEC": "여기에_네이버_클라이언트_시크릿",
+    "GMAIL_USER": "관리자_이메일@gmail.com",
+    "GMAIL_PW": "구글_앱_비밀번호", # 일반 비번이 아닌 '앱 비밀번호' 16자리
+    "GH_TOKEN": "선택사항_깃허브_토큰",
     "REPO": "girllangjak/ai-news-scraper"
 }
+# ==========================================
 
 def call_gemini(prompt, is_json=False):
-    """AI 호출 로그를 남기는 Gemini 함수"""
+    """최신 모델 ID를 사용하여 Gemini API 호출"""
     start_time = time.time()
     for model in MODEL_PRIORITY:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={CONFIG['GEMINI_KEY']}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={CREDENTIALS['GEMINI_KEY']}"
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {
                 "response_mime_type": "application/json" if is_json else "text/plain",
-                "temperature": 0.1
+                "temperature": 0.2
             }
         }
         try:
-            res = requests.post(url, json=payload, timeout=60)
+            res = requests.post(url, json=payload, timeout=30)
             elapsed = round(time.time() - start_time, 2)
             if res.status_code == 200:
                 text = res.json()['candidates'][0]['content']['parts'][0]['text'].strip()
-                return text, f"성공({model}, {elapsed}초)"
-        except Exception as e:
-            continue
-    return None, f"실패(모든 모델 응답 없음, {round(time.time() - start_time, 2)}초)"
+                return text, f"성공({model}, {elapsed}s)"
+        except: continue
+    return None, f"실패(인증/모델확인필요, {round(time.time() - start_time, 2)}s)"
 
-def fetch_all_data_with_logs(topic):
-    """각 수집 단계별 로그(각주)를 생성하며 데이터 수집"""
+def fetch_data(topic):
+    """네이버, 구글외신, 레딧 데이터 수집 및 로그 생성"""
     logs = []
-    limit_3d = datetime.now(timezone.utc) - timedelta(days=3)
     results = {"domestic": [], "international": [], "reddit": []}
 
-    # 1. 국가/쿼리 생성 로그
-    q_prompt = f"주제 '{topic}' 분석용 국가 3곳/현지어 검색어 JSON 생성."
+    # 1. 쿼리 생성
+    q_prompt = f"Topic: {topic}. Generate 3 countries and local search queries in JSON: {{'countries': [{{'name': 'USA', 'hl': 'en', 'gl': 'US', 'query': '...'}}]}}"
     q_res, q_log = call_gemini(q_prompt, is_json=True)
-    countries = json.loads(q_res).get("countries", []) if q_res else []
     logs.append(f"📍 쿼리 생성: {q_log}")
+    
+    countries = [{"name": "USA", "hl": "en", "gl": "US", "query": topic}]
+    if q_res:
+        try: countries = json.loads(q_res).get("countries", countries)
+        except: pass
 
-    # 2. 국내 뉴스 수집 로그
+    # 2. 네이버 뉴스 (10개)
     try:
-        n_url = f"https://openapi.naver.com/v1/search/news.json?query={quote(topic)}&display=30&sort=date"
-        headers = {"X-Naver-Client-Id": CONFIG['NAVER']['ID'], "X-Naver-Client-Secret": CONFIG['NAVER']['SEC']}
-        n_res = requests.get(n_url, headers=headers).json().get('items', [])
-        for it in n_res:
-            title = re.sub('<.*?>', '', it['title'])
-            results["domestic"].append({"title": title, "link": it['link']})
+        n_url = f"https://openapi.naver.com/v1/search/news.json?query={quote(topic)}&display=20&sort=date"
+        headers = {"X-Naver-Client-Id": CREDENTIALS['NAVER_ID'], "X-Naver-Client-Secret": CREDENTIALS['NAVER_SEC']}
+        n_items = requests.get(n_url, headers=headers).json().get('items', [])
+        for it in n_items:
+            results["domestic"].append({"title": re.sub('<.*?>', '', it['title']), "link": it['link']})
             if len(results["domestic"]) >= 10: break
-        logs.append(f"📍 네이버 뉴스: {len(results['domestic'])}건 확보")
-    except:
-        logs.append("📍 네이버 뉴스: 수집 오류")
+        logs.append(f"📍 네이버 뉴스: {len(results['domestic'])}건")
+    except: logs.append("📍 네이버 뉴스: 오류")
 
-    # 3. 해외 뉴스 수집 로그
-    intl_count = 0
+    # 3. 구글 외신 (10개)
     for c in countries:
-        g_url = f"https://news.google.com/rss/search?q={quote(c['query'])}&hl={c['hl']}&gl={c['gl']}&ceid={c['gl']}:{c['hl']}"
         try:
+            g_url = f"https://news.google.com/rss/search?q={quote(c['query'])}&hl={c['hl']}&gl={c['gl']}&ceid={c['gl']}:{c['hl']}"
             root = ET.fromstring(requests.get(g_url, timeout=10).text)
             for it in root.findall('.//item')[:4]:
                 results["international"].append({"country": c['name'], "title": it.find('title').text, "link": it.find('link').text})
-                intl_count += 1
-            if intl_count >= 10: break
+            if len(results["international"]) >= 10: break
         except: continue
-    logs.append(f"📍 구글 외신: {intl_count}건 확보")
+    logs.append(f"📍 구글 외신: {len(results['international'])}건")
 
-    # 4. 레딧 여론 수집 로그
-    reddit_count = 0
+    # 4. 레딧 여론 (10개)
     headers = {"User-Agent": "Mozilla/5.0"}
-    for sub in ["wallstreetbets", "stocks"]:
+    for sub in ["wallstreetbets", "stocks", "investing"]:
         try:
             r_url = f"https://www.reddit.com/r/{sub}/search.json?q={quote(topic)}&restrict_sr=1&sort=new&limit=5"
             r_res = requests.get(r_url, headers=headers, timeout=10).json().get('data', {}).get('children', [])
             for p in r_res:
                 results["reddit"].append({"source": sub, "title": p['data']['title'], "ups": p['data']['ups']})
-                reddit_count += 1
+            if len(results["reddit"]) >= 10: break
         except: continue
-    logs.append(f"📍 레딧 여론: {reddit_count}건 확보")
+    logs.append(f"📍 레딧 여론: {len(results['reddit'])}건")
 
     return results, logs
 
-def analyze_topic(topic):
-    data, logs = fetch_all_data_with_logs(topic)
+def analyze(topic):
+    """수집된 데이터를 요약하여 최종 리포트 생성"""
+    data, logs = fetch_data(topic)
     
-    # 데이터 요약 (AI 부하 감소)
-    d_titles = [n['title'] for n in data['domestic'][:5]]
-    i_titles = [f"[{n['country']}] {n['title']}" for n in data['international'][:5]]
-    r_titles = [f"({r['source']}) {r['title']}" for r in data['reddit'][:5]]
-
-    prompt = f"주제: {topic}\n뉴스:\n{d_titles}\n{i_titles}\n레딧:\n{r_titles}\n\n위 데이터를 바탕으로 시장의 온도차와 투자 리스크를 한국어 3줄로 요약해."
+    # AI 부하 방지를 위한 압축 (최신 5개씩만)
+    prompt = f"""
+    주제: {topic}
+    뉴스: {[n['title'] for n in data['domestic'][:5]]}
+    외신: {[f"[{n['country']}] {n['title']}" for n in data['international'][:5]]}
+    레딧: {[f"({r['source']}) {r['title']}" for r in data['reddit'][:5]]}
     
+    위 데이터를 기반으로 시장의 핵심 흐름과 투자 시각의 차이를 한국어로 3줄 요약하라.
+    """
     report, ai_log = call_gemini(prompt)
-    logs.append(f"📍 AI 분석: {ai_log}")
+    logs.append(f"📍 최종 분석: {ai_log}")
 
-    if not report or "오류" in ai_log:
-        report = f"### [분석 지연] {topic}\n현재 수집된 데이터량이 분석 모델의 처리 한계를 초과했거나 API 응답이 지연되고 있습니다."
+    if not report:
+        report = "### [분석 지연] 데이터는 수집되었으나 AI가 응답하지 않습니다. 로그를 확인해 주세요."
 
     return report, data, logs
 
 if __name__ == "__main__":
-    issue_url = f"https://api.github.com/repos/{CONFIG['REPO']}/issues?state=open"
-    issues = requests.get(issue_url, headers={"Authorization": f"token {CONFIG['GH_TOKEN']}"}).json()
-    
-    if issues and isinstance(issues, list):
-        full_body = ""
-        all_refs = ""
-        
-        for issue in issues:
-            topic = issue['title']
-            report, data, logs = analyze_topic(topic)
-            
-            # 본문에 리포트와 각주(Log) 추가
-            full_body += f"## 📅 주제: {topic}\n{report}\n\n"
-            full_body += "**[시스템 작업 로그]**\n" + "\n".join(logs) + "\n\n---\n"
-            
-            # 참조 링크 정리
-            all_refs += f"\n### 🔗 {topic} 참조 링크\n"
-            for l in data['domestic'] + data['international']:
-                all_refs += f"- {l['title']} ({l['link']})\n"
+    # 1. 이슈 목록 가져오기 (GitHub 연동 실패 시 테스트 키워드 사용)
+    try:
+        issue_url = f"https://api.github.com/repos/{CREDENTIALS['REPO']}/issues?state=open"
+        issues = requests.get(issue_url, headers={"Authorization": f"token {CREDENTIALS['GH_TOKEN']}"}).json()
+        if not isinstance(issues, list): issues = [{"title": "미국 증시 테크주 수급 분석"}]
+    except:
+        issues = [{"title": "미국 증시 테크주 수급 분석"}]
 
-        msg = MIMEMultipart()
-        msg['Subject'] = f"🌐 [인텔리전스] 이슈 {len(issues)}건 통합 리포트"
-        msg['From'] = msg['To'] = CONFIG['MAIL']['USER']
-        msg.attach(MIMEText(full_body + all_refs, 'plain'))
+    full_body = f"## 📅 {datetime.now().strftime('%Y-%m-%d')} 통합 리포트\n\n"
+    all_refs = ""
+
+    for issue in issues:
+        topic = issue['title']
+        print(f"🔎 {topic} 분석 중...")
+        report, data, logs = analyze(topic)
         
+        full_body += f"### 📌 주제: {topic}\n{report}\n\n**[시스템 로그]**\n" + "\n".join(logs) + "\n\n---\n"
+        
+        all_refs += f"\n### 🔗 {topic} 참조 링크\n"
+        for l in data['domestic'] + data['international']:
+            all_refs += f"- {l['title']} ({l['link']})\n"
+
+    # 2. 이메일 발송
+    msg = MIMEMultipart()
+    msg['Subject'] = f"🌐 [인텔리전스] {len(issues)}건 분석 보고서"
+    msg['From'] = msg['To'] = CREDENTIALS['GMAIL_USER']
+    msg.attach(MIMEText(full_body + all_refs, 'plain'))
+    
+    try:
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
-            server.login(CONFIG['MAIL']['USER'], CONFIG['MAIL']['PW'])
-            server.sendmail(CONFIG['MAIL']['USER'], CONFIG['MAIL']['USER'], msg.as_string())
-        print("✅ 리포트 및 로그 발송 완료")
+            server.login(CREDENTIALS['GMAIL_USER'], CREDENTIALS['GMAIL_PW'])
+            server.sendmail(CREDENTIALS['GMAIL_USER'], CREDENTIALS['GMAIL_USER'], msg.as_string())
+        print("✅ 보고서 발송 완료!")
+    except Exception as e:
+        print(f"⚠️ 발송 오류: {e}\n\n[보고서 내용]\n{full_body}")
