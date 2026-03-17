@@ -14,7 +14,6 @@ def get_env(key):
 def call_gemini(prompt, is_json=False):
     key = get_env("GEMINI_API_KEY")
     if not key: return None, "No API Key"
-    
     for model in MODEL_PRIORITY:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
         payload = {
@@ -29,15 +28,18 @@ def call_gemini(prompt, is_json=False):
     return None, "All Models Failed"
 
 def fetch_all_data(topic):
-    """국내 뉴스 + 구글 외신 + 레딧 여론 통합 수집"""
+    """국내 뉴스 + 구글 외신 + 레딧 여론 수집"""
     results = {"domestic": [], "international": [], "reddit": []}
     
-    # 1. 현지어 쿼리 생성
-    q_prompt = f"Topic: {topic}. Generate 2 countries and their local queries in JSON: {{'countries': [{{'name': 'USA', 'hl': 'en', 'gl': 'US', 'query': '...'}}]}}"
+    # 1. 쿼리 생성
+    q_prompt = f"Topic: {topic}. Generate 2 focus countries and local queries in JSON."
     q_res, _ = call_gemini(q_prompt, is_json=True)
     countries = [{"name": "USA", "hl": "en", "gl": "US", "query": topic}]
     if q_res:
-        try: countries = json.loads(q_res).get("countries", countries)
+        try:
+            start_idx = q_res.find('{')
+            end_idx = q_res.rfind('}') + 1
+            countries = json.loads(q_res[start_idx:end_idx]).get("countries", countries)
         except: pass
 
     # 2. 네이버 뉴스
@@ -48,7 +50,7 @@ def fetch_all_data(topic):
         results["domestic"] = [re.sub('<.*?>', '', i['title']) for i in n_res]
     except: pass
 
-    # 3. 구글 외신 (RSS 파싱 보강)
+    # 3. 구글 외신
     for c in countries:
         try:
             g_url = f"https://news.google.com/rss/search?q={quote(c['query'])}&hl={c['hl']}&gl={c['gl']}&ceid={c['gl']}:{c['hl']}"
@@ -66,48 +68,50 @@ def fetch_all_data(topic):
             posts = [p['data']['title'] for p in r_res.get('data', {}).get('children', [])]
             results["reddit"].extend([f"({sub}) {p}" for p in posts])
         except: continue
-
     return results
 
-def run():
+def main_process():
+    """이 함수가 실제로 모든 것을 실행하고 메일을 보냅니다"""
     repo = get_env("GITHUB_REPOSITORY")
     token = get_env("GH_TOKEN")
     
-    # 이슈 키워드 추출
-    issues = [{"title": "미국 반도체 시장 동향"}] # 기본값
+    # 키워드 가져오기
+    issues = [{"title": "글로벌 경제 및 반도체 시장 동향"}]
     if repo and token:
         try:
             issue_url = f"https://api.github.com/repos/{repo}/issues?state=open"
             res = requests.get(issue_url, headers={"Authorization": f"token {token}"}).json()
-            if isinstance(res, list) and res: issues = res
+            if isinstance(res, list) and len(res) > 0: issues = res
         except: pass
 
-    full_report = f"## 📅 {datetime.now().strftime('%Y-%m-%d')} 글로벌 인텔리전스 리포트\n\n"
+    full_report = f"## 📅 {datetime.now().strftime('%Y-%m-%d')} 인텔리전스 리포트\n\n"
 
     for issue in issues:
         topic = issue['title']
+        print(f"🔎 분석 중: {topic}")
         data = fetch_all_data(topic)
         
-        prompt = f"주제: {topic}\n국내뉴스: {data['domestic']}\n외신: {data['international']}\n레딧: {data['reddit']}\n\n위 데이터를 분석해 투자 포인트 3줄 요약해줘."
-        report, model_used = call_gemini(prompt)
+        prompt = f"주제: {topic}\n뉴스: {data['domestic']}\n외신: {data['international']}\n레딧: {data['reddit']}\n분석해줘."
+        report, model = call_gemini(prompt)
         
-        full_report += f"### 📌 {topic}\n{report}\n\n**[데이터 소스 로그]**\n- 국내: {len(data['domestic'])}건, 외신: {len(data['international'])}건, 레딧: {len(data['reddit'])}건\n- 모델: {model_used}\n\n---\n"
+        full_report += f"### 📌 {topic}\n{report}\n\n**[데이터 로그]**\n국내 {len(data['domestic'])}, 외신 {len(data['international'])}, 레딧 {len(data['reddit'])}\n모델: {model}\n\n---\n"
 
-    # 메일 발송
+    # 메일 발송 섹션
     user, pw = get_env("GMAIL_USER"), get_env("GMAIL_PW")
     if user and pw:
         msg = MIMEMultipart()
-        msg['Subject'] = f"🌐 [완료] {datetime.now().strftime('%m/%d')} 인텔리전스 보고서"
-        msg['From'] = msg['To'] = user
+        msg['Subject'] = f"🌐 [완료] {datetime.now().strftime('%m/%d')} 통합 보고서"
+        msg['From'] = user; msg['To'] = user
         msg.attach(MIMEText(full_report, 'plain'))
         try:
             with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
                 server.login(user, pw)
                 server.sendmail(user, user, msg.as_string())
-            print("✅ 발송 성공")
-        except Exception as e: print(f"❌ 발송 실패: {e}")
+            print("✅ 메일 발송 성공!")
+        except Exception as e: print(f"❌ 메일 발송 실패: {e}")
     else:
-        print("⚠️ 메일 설정이 없어 콘솔에 출력합니다.\n", full_report)
+        print("❌ 메일 설정(Secrets)이 없습니다. 콘솔 출력:\n", full_report)
 
+# ❗ 이 부분이 있어야 코드가 돌아갑니다
 if __name__ == "__main__":
-    run()
+    main_process()
