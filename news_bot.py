@@ -1,5 +1,4 @@
 import requests, smtplib, os, json, re, time
-import xml.etree.ElementTree as ET
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
@@ -28,35 +27,32 @@ def call_gemini(prompt, is_json=False):
     return None, "All Models Failed"
 
 def fetch_all_data(topic):
-    """국내 뉴스(한국어) + 구글 외신(현지어) + 레딧(영어) 통합 수집"""
     results = {"domestic": [], "international": [], "reddit": []}
     
-    # 1. 쿼리 생성 로직: 한국어 주제를 현지 전문 용어로 번역/확장
+    # 1. [핵심 수정] 검색 최적화: 한국어 주제를 '원어민 투자자 키워드'로 변환
     q_prompt = f"""
-    당신은 전문 리서치 어시스턴트입니다. 다음 한국어 주제를 분석하기 위해 해외 검색용 키워드를 생성하세요.
-    주제: {topic}
+    주제: '{topic}'
+    이 주제를 분석하기 위해 해외 검색용 키워드를 생성하세요.
+    - google_query: 뉴스 검색용 (예: 'S&P 500 top 10 stocks 2026 analysis')
+    - reddit_keywords: 레딧 검색용 짧은 단어 리스트 (예: ['NVDA', 'MSFT', 'Top10', 'stocks'])
     
-    JSON 형식으로만 응답하세요:
-    {{
-      "queries": {{
-        "google_en": "구글 뉴스 검색용 전문 영어 쿼리 (예: 'semiconductor market outlook 2026')",
-        "reddit_en": "레딧 검색용 짧고 강력한 영어 키워드 (예: 'NVDA', 'stocks')",
-        "google_jp": "일본 시장 관련 시 쿼리 (없으면 빈칸)"
-      }}
-    }}
+    JSON 응답: {{"google_query": "...", "reddit_keywords": ["kw1", "kw2"]}}
     """
     q_res, _ = call_gemini(q_prompt, is_json=True)
     
-    # 기본값 설정 (에러 대비)
-    q_data = {"google_en": topic, "reddit_en": topic} 
+    # 기본값 설정
+    en_query = topic
+    re_keywords = [topic]
     if q_res:
         try:
             start_idx = q_res.find('{')
             end_idx = q_res.rfind('}') + 1
-            q_data = json.loads(q_res[start_idx:end_idx]).get("queries", q_data)
+            q_data = json.loads(q_res[start_idx:end_idx])
+            en_query = q_data.get("google_query", topic)
+            re_keywords = q_data.get("reddit_keywords", [topic])
         except: pass
 
-    # 2. 국내 뉴스 (네이버 - 한국어 검색)
+    # 2. 국내 뉴스 (한국어)
     try:
         n_url = f"https://openapi.naver.com/v1/search/news.json?query={quote(topic)}&display=10"
         headers = {"X-Naver-Client-Id": get_env("NAVER_ID"), "X-Naver-Client-Secret": get_env("NAVER_SECRET")}
@@ -64,75 +60,70 @@ def fetch_all_data(topic):
         results["domestic"] = [re.sub('<.*?>', '', i['title']) for i in n_res]
     except: pass
 
-    # 3. 구글 외신 (AI가 생성한 영어 쿼리로 검색)
-    en_query = q_data.get("google_en", topic)
+    # 3. 구글 외신 (번역된 영어 쿼리)
     try:
         g_url = f"https://news.google.com/rss/search?q={quote(en_query)}&hl=en-US&gl=US&ceid=US:en"
         res = requests.get(g_url, timeout=10)
         titles = re.findall(r'<title>(.*?)</title>', res.text)[1:11]
-        results["international"].extend([f"[Global] {t}" for t in titles])
+        results["international"].extend([f"[Global News] {t}" for t in titles])
     except: pass
 
-    # 4. 레딧 여론 (AI가 생성한 짧은 영어 키워드로 검색)
-    re_query = q_data.get("reddit_en", topic)
-    headers = {"User-Agent": "Mozilla/5.0"}
-    for sub in ["wallstreetbets", "stocks", "investing"]:
+    # 4. [강화] 레딧 여론 (AI가 뽑은 여러 키워드로 반복 검색)
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    for kw in re_keywords[:3]: # 상위 3개 키워드로 검색
         try:
-            r_url = f"https://www.reddit.com/r/{sub}/search.json?q={quote(re_query)}&restrict_sr=1&sort=new&limit=5"
+            r_url = f"https://www.reddit.com/r/all/search.json?q={quote(kw)}&limit=5&sort=relevance"
             r_res = requests.get(r_url, headers=headers, timeout=10).json()
-            posts = [p['data']['title'] for p in r_res.get('data', {}).get('children', [])]
-            results["reddit"].extend([f"({sub}) {p}" for p in posts])
+            posts = [f"({kw}) {p['data']['title']}" for p in r_res.get('data', {}).get('children', [])]
+            results["reddit"].extend(posts)
+            if len(results["reddit"]) >= 10: break # 최대 10건
         except: continue
         
     return results
 
 def main_process():
     repo, token = get_env("GITHUB_REPOSITORY"), get_env("GH_TOKEN")
-    issues = [{"title": "글로벌 증시 및 주요 종목 분석"}]
+    # GitHub 이슈에서 주제 가져오기 (없으면 기본값)
+    issues = [{"title": "미국 주식 상위 10개 종목"}]
     if repo and token:
         try:
-            issue_url = f"https://api.github.com/repos/{repo}/issues?state=open"
-            res = requests.get(issue_url, headers={"Authorization": f"token {token}"}).json()
-            if isinstance(res, list) and len(res) > 0: issues = res
+            res = requests.get(f"https://api.github.com/repos/{repo}/issues?state=open", 
+                               headers={"Authorization": f"token {token}"}).json()
+            if isinstance(res, list) and res: issues = res
         except: pass
 
-    full_report = f"## 📅 {datetime.now().strftime('%Y-%m-%d')} 글로벌 인텔리전스 리포트\n\n"
+    full_report = f"## 📅 {datetime.now().strftime('%Y-%m-%d')} 글로벌 통합 리포트\n\n"
 
     for issue in issues:
         topic = issue['title']
-        print(f"🔎 전략적 다국어 수집 중: {topic}")
         data = fetch_all_data(topic)
         
+        # 분석 요청 (수집된 영어 데이터를 한글로 분석하라고 명시)
         prompt = f"""
-        당신은 글로벌 투자 전략가입니다. 다음 데이터를 종합하여 리포트를 작성하세요.
         주제: {topic}
-        [국내 뉴스]: {data['domestic']}
-        [해외 외신]: {data['international']}
-        [레딧 여론]: {data['reddit']}
+        [국내 데이터]: {data['domestic']}
+        [해외 외신(영어)]: {data['international']}
+        [레딧 여론(영어)]: {data['reddit']}
         
-        지침:
-        1. 국내외 시각 차이를 '온도 차이'라는 항목으로 분석할 것.
-        2. 레딧의 서양 개미(투자자)들 반응을 생생하게 전달할 것.
-        3. 한국어로 전문성 있게 작성할 것.
+        당신은 다국어 분석가입니다. 위 영어 데이터들을 한국어로 번역/요약하여 
+        '국내 vs 해외 온도 차이'와 '서양 투자자들의 생생한 목소리'를 리포트로 작성하세요.
         """
         report, model = call_gemini(prompt)
         
         full_report += f"### 📌 {topic}\n{report}\n\n"
-        full_report += f"**[데이터 수집 로그]**\n- 국내: {len(data['domestic'])}건\n- 해외(영어 검색): {len(data['international'])}건\n- 레딧(현지 커뮤니티): {len(data['reddit'])}건\n- 분석 모델: {model}\n\n---\n"
+        full_report += f"**[데이터 로그]**\n- 국내: {len(data['domestic'])}, 해외뉴스: {len(data['international'])}, 레딧: {len(data['reddit'])}\n- 모델: {model}\n\n---\n"
 
     # 메일 발송
     user, pw = get_env("GMAIL_USER"), get_env("GMAIL_PW")
     if user and pw:
         msg = MIMEMultipart()
-        msg['Subject'] = f"🌐 [Intelligence] 글로벌 통합 분석 완료"
+        msg['Subject'] = f"🌐 [Intelligence] {datetime.now().strftime('%m/%d')} 리포트"
         msg['From'] = msg['To'] = user
         msg.attach(MIMEText(full_report, 'plain'))
-        try:
-            with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
-                server.login(user, pw)
-                server.sendmail(user, user, msg.as_string())
-            print("✅ 메일 발송 성공!")
-        except Exception as e: print(f"❌ 발송 실패: {e}")
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+            server.login(user, pw)
+            server.sendmail(user, user, msg.as_string())
+        print("✅ 발송 성공")
 
 if __name__ == "__main__":
     main_process()
